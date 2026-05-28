@@ -11,6 +11,10 @@ class QWebEngineView;
 class QWebEngineProfile;
 class QWebEngineUrlRequestInterceptor;
 class QTimer;
+class QAction;
+class QKeyEvent;
+class QKeySequence;
+class QMouseEvent;
 
 namespace KTextEditor
 {
@@ -39,6 +43,7 @@ public Q_SLOTS:
 
 protected:
     void changeEvent(QEvent *event) override;
+    bool eventFilter(QObject *obj, QEvent *event) override;
 
 private Q_SLOTS:
     void scheduleRender();
@@ -53,6 +58,13 @@ private:
     QUrl baseUrl() const;
     static QString buildHtml();
 
+    // Forward input the preview doesn't use back to Kate: QWebEngineView's render
+    // widget swallows keys/mouse buttons before Kate's shortcut machinery sees them.
+    void installInputFilter();
+    bool forwardKeyEvent(QKeyEvent *event);
+    bool forwardMouseEvent(QMouseEvent *event);
+    QAction *kateActionFor(const QKeySequence &seq) const;
+
     QPointer<KTextEditor::MainWindow> m_mainWindow;
     QWebEngineView *m_web = nullptr;
     QWebEngineProfile *m_profile = nullptr;
@@ -60,6 +72,7 @@ private:
     QTimer *m_debounce = nullptr;
     QPointer<KTextEditor::Document> m_doc;
     QPointer<KTextEditor::View> m_view;
+    QPointer<QWidget> m_inputTarget;
     bool m_loaded = false;
     bool m_remoteApplied = false;
 };
