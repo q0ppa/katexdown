@@ -1,11 +1,29 @@
 # Kate Markdown Preview
 
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/header-dark.svg" />
+  <source media="(prefers-color-scheme: light)" srcset="assets/header-light.svg" />
+  <img src="assets/header-light.svg" alt="Kate Markdown Preview" width="100%" />
+</picture>
+
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+&nbsp;![KDE Frameworks 6](https://img.shields.io/badge/KDE%20Frameworks-6-1d99f3?logo=kde&logoColor=white)
+&nbsp;![Qt 6](https://img.shields.io/badge/Qt-6-41cd52?logo=qt&logoColor=white)
+&nbsp;![Runtime: offline](https://img.shields.io/badge/runtime-offline-2ea043)
+
+</div>
+
 A Kate plugin that opens a GitHub-styled preview of the Markdown file you are editing in a new tab, and updates it live as you type. Toggle between GitHub's own colors and your active editor/system theme.
 
-<!-- Add screenshots to docs/ and they will show up here.
-![GitHub theme](docs/screenshot-github.png)
-![Theme-matched](docs/screenshot-app.png)
--->
+## Screenshots
+
+| GitHub style | Theme-matched style |
+| :----------: | :-----------------: |
+| ![GitHub style preview](assets/screenshot-github.png) | ![Theme-matched preview](assets/screenshot-app.png) |
+
+<!-- Placeholder paths. Drop assets/screenshot-github.png and assets/screenshot-app.png to populate this section. -->
 
 ## Why this exists
 
@@ -18,6 +36,8 @@ Kate's built-in preview uses a plain Qt renderer that looks nothing like GitHub.
 - GitHub light and dark, picked automatically from your system, or forced
 - A theme-matched mode that recolors the same GitHub layout from your active Kate editor theme, so code blocks use the exact same syntax colors as the editor
 - GitHub Flavored Markdown: tables, strikethrough, autolinks, and `- [ ]` task list checkboxes
+- GitHub alerts (`> [!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`, `[!CAUTION]`) with the matching octicons and colors
+- YAML frontmatter rendered as a GitHub-style metadata table at the top of the file
 - Toolbar button and a configurable <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd> shortcut
 - Everything is bundled. No network access at runtime
 
@@ -68,7 +88,13 @@ After installing, enable it: Settings, then Configure Kate, then Plugins, then c
 
 ## Usage
 
-Open any `.md` file, then either:
+Open any Markdown file in Kate:
+
+```bash
+kate path/to/notes.md
+```
+
+Then trigger the preview in one of three ways:
 
 - press <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd>, or
 - click the Markdown Preview button in the main toolbar (Settings, then Toolbars Shown, then Main Toolbar if it is hidden), or
@@ -91,8 +117,18 @@ Change the shortcut under Settings, then Configure Keyboard Shortcuts, search fo
 
 The preview is a `QWebEngineView` added to Kate's tab area through `KTextEditor::MainWindow::addWidget`. The page is one self-contained HTML document with the assets inlined, so nothing loads over the network.
 
+```mermaid
+flowchart LR
+    A["Markdown document"] -->|"textChanged (debounced)"| B["PreviewWidget"]
+    B -->|"setHtml once"| C["QWebEngineView"]
+    B -->|"runJavaScript()"| D["preview.js"]
+    D --> E["markdown-it<br/>tasks · alerts · frontmatter"]
+    D --> F["highlight.js"]
+    G["Editor theme / GitHub palette"] -->|"CSS variables"| C
+```
+
 - Layout and typography come from `github-markdown-css`. The built-in color values are stripped out so the plugin can drive them from CSS custom properties.
-- Markdown is parsed by [markdown-it](https://github.com/markdown-it/markdown-it) with a small task-list plugin for checkboxes.
+- Markdown is parsed by [markdown-it](https://github.com/markdown-it/markdown-it). Small bundled plugins add task-list checkboxes and GitHub alerts, and leading YAML frontmatter is parsed with [js-yaml](https://github.com/nodeca/js-yaml) into a metadata table.
 - Code highlighting uses [highlight.js](https://github.com/highlightjs/highlight.js). In GitHub style it uses the github/github-dark themes. In theme-matched style the token colors are generated at runtime from `KTextEditor::View::theme()`, so they line up with the editor.
 
 Code highlighting is close to GitHub but not byte-identical, because GitHub uses its own server-side highlighter rather than highlight.js. If you want exact code colors, [starry-night](https://github.com/wooorm/starry-night) is a faithful port of GitHub's highlighter and could replace highlight.js.
@@ -121,6 +157,7 @@ Source layout:
 - [github-markdown-css](https://github.com/sindresorhus/github-markdown-css) by Sindre Sorhus
 - [markdown-it](https://github.com/markdown-it/markdown-it)
 - [highlight.js](https://github.com/highlightjs/highlight.js)
+- [js-yaml](https://github.com/nodeca/js-yaml)
 
 ## License
 
