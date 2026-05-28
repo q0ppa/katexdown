@@ -1,5 +1,3 @@
-# Kate Markdown Preview
-
 <div align="center">
 
 <picture>
@@ -11,7 +9,6 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 &nbsp;![KDE Frameworks 6](https://img.shields.io/badge/KDE%20Frameworks-6-1d99f3?logo=kde&logoColor=white)
 &nbsp;![Qt 6](https://img.shields.io/badge/Qt-6-41cd52?logo=qt&logoColor=white)
-&nbsp;![Runtime: offline](https://img.shields.io/badge/runtime-offline-2ea043)
 
 </div>
 
@@ -25,37 +22,19 @@ A Kate plugin that opens a GitHub-styled preview of the Markdown file you are ed
 
 <!-- Placeholder paths. Drop assets/screenshot-github.png and assets/screenshot-app.png to populate this section. -->
 
-## Why this exists
-
-Kate's built-in preview uses a plain Qt renderer that looks nothing like GitHub. The other option, `kmarkdownwebview`, was abandoned in 2020 and never ported to KF6. This plugin fills that gap: it renders with the actual [github-markdown-css](https://github.com/sindresorhus/github-markdown-css), so headings, tables, blockquotes, task lists, and alerts match what you would see on github.com. It also runs fully offline. No API calls, no rate limits.
-
-## Features
-
-- Preview opens in a real tab next to your document, not a cramped side panel
-- Live updates while you type (debounced)
-- GitHub light and dark, picked automatically from your system, or forced
-- A theme-matched mode that recolors the same GitHub layout from your active Kate editor theme, so code blocks use the exact same syntax colors as the editor
-- GitHub Flavored Markdown: tables, strikethrough, autolinks, and `- [ ]` task list checkboxes
-- GitHub alerts (`> [!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`, `[!CAUTION]`) with the matching octicons and colors
-- YAML frontmatter rendered as a GitHub-style metadata table at the top of the file
-- Toolbar button and a configurable <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd> shortcut
-- Everything is bundled. No network access at runtime
-
-## Requirements
-
-- Kate / KTextEditor 6 (KF6)
-- Qt 6 with WebEngine
-
-On Arch:
-
-```bash
-sudo pacman -S --needed base-devel cmake extra-cmake-modules \
-    ktexteditor qt6-webengine kcoreaddons ki18n kconfig kxmlgui ksyntaxhighlighting
-```
-
 ## Installation
 
-Build it:
+### Arch Linux (recommended)
+
+Install [`kate-markdown-preview-git`](https://aur.archlinux.org/packages/kate-markdown-preview-git) from the AUR with any helper:
+
+```bash
+yay -S kate-markdown-preview-git   # or: paru -S kate-markdown-preview-git
+```
+
+The package builds from the latest commit and pulls in every dependency. Then enable it: Settings, then Configure Kate, then Plugins, then check Markdown Preview (GitHub).
+
+### Build from source
 
 ```bash
 git clone https://github.com/uwuclxdy/kate-markdown-preview.git
@@ -64,7 +43,7 @@ cmake -B build -S . -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX=/us
 cmake --build build
 ```
 
-Then pick one of these.
+Then pick one.
 
 System install (loads in every Kate launch):
 
@@ -85,6 +64,36 @@ After installing, enable it: Settings, then Configure Kate, then Plugins, then c
 
 > [!NOTE]
 > Qt WebEngine is initialized from inside Kate. On some setups you may see a console warning about `Qt::AA_ShareOpenGLContexts`. It is harmless in practice.
+
+## Requirements
+
+The AUR package resolves these for you. You only need them to build from source.
+
+- Kate / KTextEditor 6 (KF6)
+- Qt 6 with WebEngine
+
+On Arch:
+
+```bash
+sudo pacman -S --needed base-devel cmake extra-cmake-modules \
+    ktexteditor qt6-webengine kcoreaddons ki18n kconfig kxmlgui ksyntaxhighlighting
+```
+
+## Why this exists
+
+Kate's built-in preview uses a plain Qt renderer that looks nothing like GitHub. The other option, `kmarkdownwebview`, was abandoned in 2020 and never ported to KF6. This plugin fills that gap: it renders with the actual [github-markdown-css](https://github.com/sindresorhus/github-markdown-css), so headings, tables, blockquotes, task lists, and alerts match what you would see on github.com. It also runs fully offline. No API calls, no rate limits.
+
+## Features
+
+- Preview opens in a real tab next to your document, not a cramped side panel
+- Live updates while you type (debounced)
+- GitHub light and dark, picked automatically from your system, or forced
+- A theme-matched mode that recolors the same GitHub layout from your active Kate editor theme, so code blocks use the exact same syntax colors as the editor
+- GitHub Flavored Markdown: tables, strikethrough, autolinks, and `- [ ]` task list checkboxes
+- GitHub alerts (`> [!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`, `[!CAUTION]`) with the matching octicons and colors
+- YAML frontmatter rendered as a GitHub-style metadata table at the top of the file
+- Toolbar button and a configurable <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd> shortcut
+- Everything is bundled. No network access at runtime
 
 ## Usage
 
