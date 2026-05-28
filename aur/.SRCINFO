@@ -1,8 +1,8 @@
-pkgbase = kate-markdown-preview-git
+pkgbase = katdown-git
 	pkgdesc = GitHub-styled live Markdown preview for Kate (KTextEditor/KF6)
 	pkgver = r3.f4f7b4c
 	pkgrel = 1
-	url = https://github.com/uwuclxdy/kate-markdown-preview
+	url = https://github.com/uwuclxdy/katdown
 	arch = x86_64
 	license = GPL-3.0-or-later
 	makedepends = git
@@ -16,9 +16,9 @@ pkgbase = kate-markdown-preview-git
 	depends = kcoreaddons
 	depends = qt6-base
 	depends = qt6-webengine
-	provides = kate-markdown-preview
-	conflicts = kate-markdown-preview
-	source = git+https://github.com/uwuclxdy/kate-markdown-preview.git
+	provides = katdown
+	conflicts = katdown
+	source = git+https://github.com/uwuclxdy/katdown.git
 	sha256sums = SKIP
 
-pkgname = kate-markdown-preview-git
+pkgname = katdown-git

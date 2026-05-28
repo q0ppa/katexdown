@@ -20,7 +20,7 @@
 
 namespace
 {
-const QString repoUrl = QStringLiteral("https://github.com/uwuclxdy/kate-markdown-preview");
+const QString repoUrl = QStringLiteral("https://github.com/uwuclxdy/katdown");
 
 QString currentVersion()
 {
@@ -134,9 +134,9 @@ void ConfigPage::checkForUpdates()
     m_checkButton->setEnabled(false);
     m_updateStatus->setText(i18n("Checking…"));
 
-    QNetworkRequest req(QUrl(QStringLiteral("https://api.github.com/repos/uwuclxdy/kate-markdown-preview/releases/latest")));
+    QNetworkRequest req(QUrl(QStringLiteral("https://api.github.com/repos/uwuclxdy/katdown/releases/latest")));
     req.setRawHeader("Accept", "application/vnd.github+json");
-    req.setRawHeader("User-Agent", "kate-markdown-preview");
+    req.setRawHeader("User-Agent", "katdown");
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
 
     QNetworkReply *reply = m_net->get(req);

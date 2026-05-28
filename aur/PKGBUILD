@@ -1,17 +1,17 @@
 # Maintainer: uwuclxdy <uwuclxdy@pm.me>
 
-pkgname=kate-markdown-preview-git
-_pkgbase=kate-markdown-preview
+pkgname=katdown-git
+_pkgbase=katdown
 pkgver=r3.f4f7b4c
 pkgrel=1
 pkgdesc="GitHub-styled live Markdown preview for Kate (KTextEditor/KF6)"
 arch=('x86_64')
-url="https://github.com/uwuclxdy/kate-markdown-preview"
+url="https://github.com/uwuclxdy/katdown"
 license=('GPL-3.0-or-later')
 depends=('ktexteditor' 'syntax-highlighting' 'kxmlgui' 'kconfig' 'ki18n' 'kcoreaddons' 'qt6-base' 'qt6-webengine')
 makedepends=('git' 'cmake' 'extra-cmake-modules')
-provides=('kate-markdown-preview')
-conflicts=('kate-markdown-preview')
+provides=('katdown')
+conflicts=('katdown')
 source=("git+$url.git")
 sha256sums=('SKIP')
 

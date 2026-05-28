@@ -24,10 +24,10 @@ A Kate plugin that opens a GitHub-styled preview of the Markdown file you are ed
 
 ### Arch Linux (recommended)
 
-Install [`kate-markdown-preview-git`](https://aur.archlinux.org/packages/kate-markdown-preview-git) from the AUR with any helper:
+Install [`katdown-git`](https://aur.archlinux.org/packages/katdown-git) from the AUR with any helper:
 
 ```bash
-yay -S kate-markdown-preview-git   # or: paru -S kate-markdown-preview-git
+yay -S katdown-git   # or: paru -S katdown-git
 ```
 
 The package builds from the latest commit and pulls in every dependency. Then enable it: Settings, then Configure Kate, then Plugins, then check Markdown Preview (GitHub).
@@ -35,8 +35,8 @@ The package builds from the latest commit and pulls in every dependency. Then en
 ### Build from source
 
 ```bash
-git clone https://github.com/uwuclxdy/kate-markdown-preview.git
-cd kate-markdown-preview
+git clone https://github.com/uwuclxdy/katdown.git
+cd katdown
 cmake -B build -S . -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX=/usr
 cmake --build build
 ```
@@ -55,7 +55,7 @@ sudo cmake --install build
 cmake --install build --prefix ~/.local
 mkdir -p ~/.config/environment.d
 printf 'QT_PLUGIN_PATH=%s/.local/lib/qt6/plugins\n' "$HOME" \
-    > ~/.config/environment.d/kate-markdown-preview.conf
+    > ~/.config/environment.d/katdown.conf
 ```
 
 After installing, enable it: Settings, then Configure Kate, then Plugins, then check Markdown Preview (GitHub).
