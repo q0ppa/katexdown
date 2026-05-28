@@ -18,9 +18,7 @@ A Kate plugin that opens a GitHub-styled preview of the Markdown file you are ed
 
 | GitHub style | Theme-matched style |
 | :----------: | :-----------------: |
-| ![GitHub style preview](assets/screenshot-github.png) | ![Theme-matched preview](assets/screenshot-app.png) |
-
-<!-- Placeholder paths. Drop assets/screenshot-github.png and assets/screenshot-app.png to populate this section. -->
+| ![GitHub style preview](assets/github_theme.png) | ![Theme-matched preview](assets/native_theme.png) |
 
 ## Installation
 
@@ -43,15 +41,15 @@ cmake -B build -S . -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX=/us
 cmake --build build
 ```
 
-Then pick one.
+Then pick install type:
 
-System install (loads in every Kate launch):
+**System** (loads in every Kate launch):
 
 ```bash
 sudo cmake --install build
 ```
 
-User-local install (no root, but needs a re-login to take effect). The second command adds `~/.local/lib/qt6/plugins` to Qt's plugin search path so Kate finds it:
+**User-local** (no root, but needs a re-login to take effect). The second command adds `~/.local/lib/qt6/plugins` to Qt's plugin search path so Kate finds it:
 
 ```bash
 cmake --install build --prefix ~/.local
@@ -81,7 +79,7 @@ sudo pacman -S --needed base-devel cmake extra-cmake-modules \
 
 ## Why this exists
 
-Kate's built-in preview uses a plain Qt renderer that looks nothing like GitHub. The other option, `kmarkdownwebview`, was abandoned in 2020 and never ported to KF6. This plugin fills that gap: it renders with the actual [github-markdown-css](https://github.com/sindresorhus/github-markdown-css), so headings, tables, blockquotes, task lists, and alerts match what you would see on github.com. It also runs fully offline. No API calls, no rate limits.
+Kate's built-in preview uses a plain Qt renderer that looks nothing like GitHub. The other option, `kmarkdownwebview`, was abandoned in 2020 and never ported to KF6. This plugin fills that gap: it renders with the actual [github-markdown-css](https://github.com/sindresorhus/github-markdown-css), so headings, tables, blockquotes, task lists, and alerts match what you would see on github.com. It also runs fully offline (unless you opt in).
 
 ## Features
 
@@ -113,7 +111,9 @@ The button is greyed out unless the active tab is a Markdown document. The previ
 
 ## Configuration
 
-Settings, then Configure Kate, then Markdown Preview.
+Settings -> Configure Kate -> (Plugins -> enable `GitHub Markdown Preview`) -> Markdown Preview.
+
+![GitHub style preview](assets/settings.png)
 
 | Setting | Options | What it does |
 |---------|---------|--------------|
@@ -141,11 +141,11 @@ flowchart LR
 - Markdown is parsed by [markdown-it](https://github.com/markdown-it/markdown-it). Small bundled plugins add task-list checkboxes and GitHub alerts, and leading YAML frontmatter is parsed with [js-yaml](https://github.com/nodeca/js-yaml) into a metadata table.
 - Code highlighting uses [highlight.js](https://github.com/highlightjs/highlight.js). In GitHub style it uses the github/github-dark themes. In theme-matched style the token colors are generated at runtime from `KTextEditor::View::theme()`, so they line up with the editor.
 
-Code highlighting is close to GitHub but not byte-identical, because GitHub uses its own server-side highlighter rather than highlight.js. If you want exact code colors, [starry-night](https://github.com/wooorm/starry-night) is a faithful port of GitHub's highlighter and could replace highlight.js.
+Code highlighting is close to GitHub but not byte-identical, because GitHub uses its own server-side highlighter rather than highlight.js. If needed, [starry-night](https://github.com/wooorm/starry-night) is a faithful port of GitHub's highlighter and could replace highlight.js.
 
 ## Development
 
-Build, then run a throwaway Kate that loads the freshly built plugin without installing it:
+Build, then run Kate that loads the freshly built plugin without installing it:
 
 ```bash
 cmake -B build -S . -DCMAKE_BUILD_TYPE=Debug
