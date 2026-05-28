@@ -1,7 +1,7 @@
 {
     "KPlugin": {
-        "Id": "markdownpreviewplugin",
-        "Name": "GitHub Markdown Preview",
+        "Id": "katdown",
+        "Name": "Katdown",
         "Description": "GitHub-styled Markdown preview in GitHub colors or editor/system theme.",
         "Icon": "text-markdown",
         "Category": "Editor",

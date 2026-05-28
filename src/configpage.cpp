@@ -24,7 +24,7 @@ const QString repoUrl = QStringLiteral("https://github.com/uwuclxdy/katdown");
 
 QString currentVersion()
 {
-    return QStringLiteral(MARKDOWNPREVIEW_VERSION);
+    return QStringLiteral(KATDOWN_VERSION);
 }
 
 // Compare dotted numeric versions ("0.10.0" > "0.9.1"). Returns -1/0/1. Any non-numeric
@@ -110,12 +110,12 @@ ConfigPage::ConfigPage(QWidget *parent)
 
 QString ConfigPage::name() const
 {
-    return i18n("Markdown Preview");
+    return i18n("Katdown");
 }
 
 QString ConfigPage::fullName() const
 {
-    return i18n("Markdown Preview");
+    return i18n("Katdown");
 }
 
 QIcon ConfigPage::icon() const

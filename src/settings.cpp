@@ -5,7 +5,7 @@
 
 static QString groupName()
 {
-    return QStringLiteral("MarkdownPreview");
+    return QStringLiteral("Katdown");
 }
 
 Settings::Settings(QObject *parent)

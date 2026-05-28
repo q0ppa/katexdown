@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<gui name="markdownpreview" version="2" xmlns="http://www.kde.org/standards/kxmlgui/1.0">
+<gui name="katdown" version="2" xmlns="http://www.kde.org/standards/kxmlgui/1.0">
   <MenuBar>
     <Menu name="tools">
-      <Action name="markdownpreview_show" group="tools_operations" />
+      <Action name="katdown_show" group="tools_operations" />
     </Menu>
   </MenuBar>
   <ToolBar name="mainToolBar" noMerge="0">
-    <Action name="markdownpreview_show" />
+    <Action name="katdown_show" />
   </ToolBar>
 </gui>

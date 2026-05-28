@@ -1,6 +1,6 @@
 <div align="center">
 
-# Kate Markdown Preview (katdown)
+# Katdown
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 &nbsp;![KDE Frameworks 6](https://img.shields.io/badge/KDE%20Frameworks-6-1d99f3?logo=kde&logoColor=white)
@@ -29,7 +29,7 @@ Install [`katdown-git`](https://aur.archlinux.org/packages/katdown-git) from the
 yay -S katdown-git   # or: paru -S katdown-git
 ```
 
-The package builds from the latest commit and pulls in every dependency. Then enable it: Settings, then Configure Kate, then Plugins, then check Markdown Preview (GitHub).
+The package builds from the latest commit and pulls in every dependency. Then enable it: Settings, then Configure Kate, then Plugins, then check Katdown.
 
 ### Build from source
 
@@ -57,7 +57,7 @@ printf 'QT_PLUGIN_PATH=%s/.local/lib/qt6/plugins\n' "$HOME" \
     > ~/.config/environment.d/katdown.conf
 ```
 
-After installing, enable it: Settings, then Configure Kate, then Plugins, then check Markdown Preview (GitHub).
+After installing, enable it: Settings, then Configure Kate, then Plugins, then check Katdown.
 
 > [!NOTE]
 > Qt WebEngine is initialized from inside Kate. On some setups you may see a console warning about `Qt::AA_ShareOpenGLContexts`. It is harmless in practice.
@@ -103,14 +103,14 @@ kate path/to/notes.md
 Then trigger the preview in one of three ways:
 
 - press <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd>, or
-- click the Markdown Preview button in the main toolbar (Settings, then Toolbars Shown, then Main Toolbar if it is hidden), or
-- use Tools, then Markdown Preview.
+- click the Katdown button in the main toolbar (Settings, then Toolbars Shown, then Main Toolbar if it is hidden), or
+- use Tools, then Katdown.
 
 The button is greyed out unless the active tab is a Markdown document. The preview tab tracks the document and re-renders as you edit. Triggering it again focuses the existing tab instead of opening a second one.
 
 ## Configuration
 
-Settings -> Configure Kate -> (Plugins -> enable `GitHub Markdown Preview`) -> Markdown Preview.
+Settings -> Configure Kate -> (Plugins -> enable `Katdown`) -> Katdown.
 
 ![GitHub style preview](assets/settings.png)
 
@@ -120,7 +120,7 @@ Settings -> Configure Kate -> (Plugins -> enable `GitHub Markdown Preview`) -> M
 | GitHub variant | Auto / Light / Dark | Which GitHub palette to use. Auto follows whether your system is light or dark. Only applies in GitHub style. |
 | Load media previews from remote URLs | On / Off (default) | When on, images referencing `http(s)` URLs are fetched and rendered. When off (the default), the preview loads no remote resources and works fully offline. Images with paths relative to the document always load regardless of this setting. |
 
-Change the shortcut under Settings, then Configure Keyboard Shortcuts, search for Markdown Preview.
+Change the shortcut under Settings, then Configure Keyboard Shortcuts, search for Katdown.
 
 ## How it works
 

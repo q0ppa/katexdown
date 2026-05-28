@@ -1,10 +1,10 @@
 # Cut a GitHub Release on every v* tag push. Releases exist purely as version markers: the
-# plugin's in-app update check (Settings -> Markdown Preview) compares the installed version
+# plugin's in-app update check (Settings -> Katdown) compares the installed version
 # against the latest release tag. Nothing is built or attached here — the install paths are the
 # AUR package and build-from-source, never a release download.
 #
 # Tagging discipline: the tag must match project(VERSION) in CMakeLists.txt (and the Version in
-# src/markdownpreview.json), otherwise the in-app check reports a phantom update. The job hard
+# src/katdown.json), otherwise the in-app check reports a phantom update. The job hard
 # fails on a mismatch so a stale version bump can't ship.
 #
 # actions/checkout is SHA-pinned because this workflow runs with a write-scoped GITHUB_TOKEN.

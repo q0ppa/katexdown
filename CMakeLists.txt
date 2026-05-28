@@ -32,7 +32,7 @@ find_package(KF6 ${KF_MIN_VERSION} REQUIRED COMPONENTS
     SyntaxHighlighting
 )
 
-kcoreaddons_add_plugin(markdownpreviewplugin
+kcoreaddons_add_plugin(katdown
     INSTALL_NAMESPACE "kf6/ktexteditor"
     SOURCES
         src/plugin.cpp
@@ -43,13 +43,13 @@ kcoreaddons_add_plugin(markdownpreviewplugin
         data/resources.qrc
 )
 
-target_include_directories(markdownpreviewplugin PRIVATE src)
+target_include_directories(katdown PRIVATE src)
 
-target_compile_definitions(markdownpreviewplugin PRIVATE
-    MARKDOWNPREVIEW_VERSION="${PROJECT_VERSION}"
+target_compile_definitions(katdown PRIVATE
+    KATDOWN_VERSION="${PROJECT_VERSION}"
 )
 
-target_link_libraries(markdownpreviewplugin PRIVATE
+target_link_libraries(katdown PRIVATE
     Qt6::Core
     Qt6::Gui
     Qt6::Widgets

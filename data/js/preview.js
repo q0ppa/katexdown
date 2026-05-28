@@ -1,4 +1,4 @@
-// Render glue for the Kate Markdown Preview plugin.
+// Render glue for the Katdown plugin.
 // Exposes a small API the C++ side drives via runJavaScript():
 //   __setMarkdown(text)      render markdown source
 //   __applyVars(obj)         set CSS custom properties on <html>

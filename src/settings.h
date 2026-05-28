@@ -4,7 +4,7 @@
 
 /**
  * Plugin-wide settings, persisted in the application's KSharedConfig under the
- * group "MarkdownPreview". A single instance broadcasts changed() so every open
+ * group "Katdown". A single instance broadcasts changed() so every open
  * preview re-themes at once.
  */
 class Settings : public QObject

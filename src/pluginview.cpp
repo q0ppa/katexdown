@@ -23,7 +23,7 @@ namespace
 {
 QString readUiRc()
 {
-    QFile f(QStringLiteral(":/markdownpreview/ui.rc"));
+    QFile f(QStringLiteral(":/katdown/ui.rc"));
     if (!f.open(QIODevice::ReadOnly)) {
         return QString();
     }
@@ -36,10 +36,10 @@ PluginView::PluginView(QObject *plugin, KTextEditor::MainWindow *mainWindow)
     , KXMLGUIClient()
     , m_mainWindow(mainWindow)
 {
-    setComponentName(QStringLiteral("markdownpreview"), i18n("Markdown Preview"));
+    setComponentName(QStringLiteral("katdown"), i18n("Katdown"));
 
-    m_action = actionCollection()->addAction(QStringLiteral("markdownpreview_show"));
-    m_action->setText(i18n("Markdown Preview"));
+    m_action = actionCollection()->addAction(QStringLiteral("katdown_show"));
+    m_action->setText(i18n("Preview"));
     m_action->setToolTip(i18n("Open a GitHub-styled preview of this Markdown document in a new tab"));
     m_action->setIcon(QIcon::fromTheme(QStringLiteral("text-markdown"), QIcon::fromTheme(QStringLiteral("view-preview"))));
     actionCollection()->setDefaultShortcut(m_action, QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_M));
