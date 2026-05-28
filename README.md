@@ -1,10 +1,6 @@
 <div align="center">
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/header-dark.svg" />
-  <source media="(prefers-color-scheme: light)" srcset="assets/header-light.svg" />
-  <img src="assets/header-light.svg" alt="Kate Markdown Preview" width="100%" />
-</picture>
+# Kate Markdown Preview (katdown)
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 &nbsp;![KDE Frameworks 6](https://img.shields.io/badge/KDE%20Frameworks-6-1d99f3?logo=kde&logoColor=white)
@@ -12,7 +8,10 @@
 
 </div>
 
-A Kate plugin that opens a GitHub-styled preview of the Markdown file you are editing in a new tab, and updates it live as you type. Toggle between GitHub's own colors and your active editor/system theme.
+KDE Kate plugin for viewing GitHub-styled preview of Markdown files with live updates. Supports both GitHub's own colors and also your active editor/system theme.
+
+> [!NOTE]
+> It's vibecoded. (but it works better than anything else!)
 
 ## Screenshots
 
