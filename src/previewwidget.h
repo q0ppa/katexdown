@@ -1,12 +1,15 @@
 #pragma once
 
 #include <QPointer>
+#include <QUrl>
 #include <QWidget>
 
 #include <KTextEditor/Document>
 #include <KTextEditor/View>
 
 class QWebEngineView;
+class QWebEngineProfile;
+class QWebEngineUrlRequestInterceptor;
 class QTimer;
 
 namespace KTextEditor
@@ -44,11 +47,19 @@ private Q_SLOTS:
 private:
     void render();
     void runJs(const QString &code);
+    void loadPage();
+    void openLink(const QUrl &url);
+    void applyMediaPolicy();
+    QUrl baseUrl() const;
     static QString buildHtml();
 
+    QPointer<KTextEditor::MainWindow> m_mainWindow;
     QWebEngineView *m_web = nullptr;
+    QWebEngineProfile *m_profile = nullptr;
+    QWebEngineUrlRequestInterceptor *m_guard = nullptr;
     QTimer *m_debounce = nullptr;
     QPointer<KTextEditor::Document> m_doc;
     QPointer<KTextEditor::View> m_view;
     bool m_loaded = false;
+    bool m_remoteApplied = false;
 };

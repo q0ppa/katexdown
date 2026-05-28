@@ -2,6 +2,7 @@
 
 #include <KTextEditor/ConfigPage>
 
+class QCheckBox;
 class QComboBox;
 
 /**
@@ -27,4 +28,5 @@ private:
 
     QComboBox *m_mode = nullptr;
     QComboBox *m_variant = nullptr;
+    QCheckBox *m_remoteMedia = nullptr;
 };

@@ -93,7 +93,7 @@ Kate's built-in preview uses a plain Qt renderer that looks nothing like GitHub.
 - GitHub alerts (`> [!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`, `[!CAUTION]`) with the matching octicons and colors
 - YAML frontmatter rendered as a GitHub-style metadata table at the top of the file
 - Toolbar button and a configurable <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd> shortcut
-- Everything is bundled. No network access at runtime
+- Everything is bundled — the renderer and all its assets are fully offline. Remote image loading is off by default and can be enabled in settings.
 
 ## Usage
 
@@ -119,6 +119,7 @@ Settings, then Configure Kate, then Markdown Preview.
 |---------|---------|--------------|
 | Style | GitHub / Match editor or system theme | GitHub uses GitHub's palette. Match recolors the same layout from your active editor theme. |
 | GitHub variant | Auto / Light / Dark | Which GitHub palette to use. Auto follows whether your system is light or dark. Only applies in GitHub style. |
+| Load media previews from remote URLs | On / Off (default) | When on, images referencing `http(s)` URLs are fetched and rendered. When off (the default), the preview loads no remote resources and works fully offline. Images with paths relative to the document always load regardless of this setting. |
 
 Change the shortcut under Settings, then Configure Keyboard Shortcuts, search for Markdown Preview.
 

@@ -3,6 +3,8 @@
 
 #include <QApplication>
 #include <QColor>
+#include <QDesktopServices>
+#include <QDir>
 #include <QEvent>
 #include <QFile>
 #include <QFileInfo>
@@ -13,8 +15,14 @@
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
+#include <QWebEnginePage>
+#include <QWebEngineProfile>
 #include <QWebEngineSettings>
+#include <QWebEngineUrlRequestInfo>
+#include <QWebEngineUrlRequestInterceptor>
 #include <QWebEngineView>
+
+#include <functional>
 
 #include <KLocalizedString>
 #include <KSyntaxHighlighting/Theme>
@@ -200,19 +208,104 @@ QString applicationCodeCss(const Theme &theme)
     css += QStringLiteral(".hljs-emphasis{font-style:italic}.hljs-strong{font-weight:bold}");
     return css;
 }
+
+// Confine the page to its document folder: a malicious markdown (raw HTML + JS on a
+// file:// origin) could otherwise read any local file via fetch/img/etc. Only assets
+// under the canonical document root pass; remote requests are limited to images/media
+// and only when the user opted in.
+class LocalFileGuard : public QWebEngineUrlRequestInterceptor
+{
+public:
+    using QWebEngineUrlRequestInterceptor::QWebEngineUrlRequestInterceptor;
+
+    void setRoot(const QString &dir)
+    {
+        m_root = dir.isEmpty() ? QString() : QDir(dir).canonicalPath();
+    }
+
+    void setAllowRemote(bool allow)
+    {
+        m_allowRemote = allow;
+    }
+
+    void interceptRequest(QWebEngineUrlRequestInfo &info) override
+    {
+        const QUrl url = info.requestUrl();
+        const QString scheme = url.scheme();
+        if (scheme == QLatin1String("qrc") || scheme == QLatin1String("data") || scheme == QLatin1String("about") || scheme == QLatin1String("blob")) {
+            return;
+        }
+        if (scheme == QLatin1String("file")) {
+            const QString path = QFileInfo(url.toLocalFile()).canonicalFilePath();
+            const bool ok = !m_root.isEmpty() && !path.isEmpty() && (path == m_root || path.startsWith(m_root + QLatin1Char('/')));
+            if (!ok) {
+                info.block(true);
+            }
+            return;
+        }
+        const bool isMedia = info.resourceType() == QWebEngineUrlRequestInfo::ResourceTypeImage
+            || info.resourceType() == QWebEngineUrlRequestInfo::ResourceTypeMedia;
+        if (!(m_allowRemote && isMedia)) {
+            info.block(true);
+        }
+    }
+
+private:
+    QString m_root;
+    bool m_allowRemote = false;
+};
+
+// Keep link clicks from turning the preview into a browser: same-document anchors
+// scroll in place; everything else is handed back to the host via onLinkActivated.
+class PreviewPage : public QWebEnginePage
+{
+public:
+    using QWebEnginePage::QWebEnginePage;
+
+    std::function<void(const QUrl &)> onLinkActivated;
+
+    bool acceptNavigationRequest(const QUrl &url, NavigationType type, bool isMainFrame) override
+    {
+        Q_UNUSED(isMainFrame);
+        if (type == NavigationTypeLinkClicked) {
+            if (url.hasFragment() && url.matches(this->url(), QUrl::RemoveFragment)) {
+                return true;
+            }
+            if (onLinkActivated) {
+                QMetaObject::invokeMethod(
+                    this, [cb = onLinkActivated, u = url]() { cb(u); }, Qt::QueuedConnection);
+            }
+            return false;
+        }
+        return true;
+    }
+};
 } // namespace
 
 PreviewWidget::PreviewWidget(KTextEditor::MainWindow *mainWindow, KTextEditor::View *view, KTextEditor::Document *doc, QWidget *parent)
     : QWidget(parent)
+    , m_mainWindow(mainWindow)
     , m_doc(doc)
     , m_view(view)
 {
-    Q_UNUSED(mainWindow);
-
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
+
+    // Each preview owns an off-the-record profile carrying its own guard so multiple
+    // open previews each confine to their own document folder.
+    auto *guard = new LocalFileGuard(this);
+    m_guard = guard;
+    m_profile = new QWebEngineProfile(this);
+    m_profile->setUrlRequestInterceptor(guard);
+
     m_web = new QWebEngineView(this);
+    auto *page = new PreviewPage(m_profile, m_web);
+    page->onLinkActivated = [this](const QUrl &url) {
+        openLink(url);
+    };
+    m_web->setPage(page);
     m_web->settings()->setAttribute(QWebEngineSettings::FocusOnNavigationEnabled, false);
+    m_web->settings()->setAttribute(QWebEngineSettings::LocalContentCanAccessFileUrls, true);
     layout->addWidget(m_web);
 
     m_debounce = new QTimer(this);
@@ -232,15 +325,30 @@ PreviewWidget::PreviewWidget(KTextEditor::MainWindow *mainWindow, KTextEditor::V
     if (m_doc) {
         connect(m_doc, &KTextEditor::Document::textChanged, this, &PreviewWidget::scheduleRender);
         connect(m_doc, &KTextEditor::Document::documentUrlChanged, this, &PreviewWidget::updateTitle);
+        connect(m_doc, &KTextEditor::Document::documentUrlChanged, this, &PreviewWidget::loadPage);
     }
     connect(Settings::self(), &Settings::changed, this, &PreviewWidget::applyTheme);
+    connect(Settings::self(), &Settings::changed, this, &PreviewWidget::applyMediaPolicy);
 
     updateTitle();
     setWindowIcon(QIcon::fromTheme(QStringLiteral("text-markdown")));
-    m_web->setHtml(buildHtml(), QUrl(QStringLiteral("qrc:/markdownpreview/")));
+    applyMediaPolicy();
+    loadPage();
 }
 
-PreviewWidget::~PreviewWidget() = default;
+// Teardown order matters: the view (and its page) must die before the profile, and the
+// profile before the guard it references. m_web is parented to this and the QObject child
+// list destroys in reverse order of construction (web after profile after guard), which
+// gives exactly that sequence; spelling it out keeps the invariant from drifting.
+PreviewWidget::~PreviewWidget()
+{
+    delete m_web;
+    m_web = nullptr;
+    delete m_profile;
+    m_profile = nullptr;
+    delete m_guard;
+    m_guard = nullptr;
+}
 
 QString PreviewWidget::buildHtml()
 {
@@ -255,6 +363,42 @@ QString PreviewWidget::buildHtml()
     html.replace(QLatin1String("/*__JS_YAML__*/"), shieldScript(readAsset(base + QStringLiteral("js/js-yaml.min.js"))));
     html.replace(QLatin1String("/*__PREVIEW_JS__*/"), shieldScript(readAsset(base + QStringLiteral("js/preview.js"))));
     return html;
+}
+
+QUrl PreviewWidget::baseUrl() const
+{
+    if (m_doc && m_doc->url().isLocalFile()) {
+        return m_doc->url().adjusted(QUrl::RemoveFilename);
+    }
+    return QUrl(QStringLiteral("qrc:/markdownpreview/"));
+}
+
+void PreviewWidget::loadPage()
+{
+    const QString root = (m_doc && m_doc->url().isLocalFile()) ? QFileInfo(m_doc->url().toLocalFile()).absolutePath() : QString();
+    static_cast<LocalFileGuard *>(m_guard)->setRoot(root);
+    m_loaded = false;
+    m_web->setHtml(buildHtml(), baseUrl());
+}
+
+void PreviewWidget::openLink(const QUrl &url)
+{
+    if (url.isLocalFile() && m_mainWindow) {
+        m_mainWindow->openUrl(url);
+    } else if (!url.scheme().isEmpty()) {
+        QDesktopServices::openUrl(url);
+    }
+}
+
+void PreviewWidget::applyMediaPolicy()
+{
+    const bool remote = Settings::self()->loadRemoteMedia();
+    m_web->settings()->setAttribute(QWebEngineSettings::LocalContentCanAccessRemoteUrls, remote);
+    static_cast<LocalFileGuard *>(m_guard)->setAllowRemote(remote);
+    if (m_loaded && remote != m_remoteApplied) {
+        loadPage();
+    }
+    m_remoteApplied = remote;
 }
 
 void PreviewWidget::runJs(const QString &code)

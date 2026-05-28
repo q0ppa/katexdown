@@ -31,9 +31,11 @@ public:
     {
         return m_ghVariant;
     }
+    bool loadRemoteMedia() const { return m_loadRemoteMedia; }
 
     void setMode(Mode mode);
     void setGhVariant(GhVariant variant);
+    void setLoadRemoteMedia(bool enabled);
 
     void load();
     void save() const;
@@ -46,4 +48,5 @@ private:
 
     Mode m_mode = GitHub;
     GhVariant m_ghVariant = Auto;
+    bool m_loadRemoteMedia = false;
 };

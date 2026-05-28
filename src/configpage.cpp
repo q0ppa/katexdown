@@ -1,6 +1,7 @@
 #include "configpage.h"
 #include "settings.h"
 
+#include <QCheckBox>
 #include <QComboBox>
 #include <QFormLayout>
 #include <QIcon>
@@ -34,10 +35,20 @@ ConfigPage::ConfigPage(QWidget *parent)
     hint->setWordWrap(true);
     hint->setEnabled(false);
     outer->addWidget(hint);
+
+    m_remoteMedia = new QCheckBox(i18n("Load media previews from remote URLs"), this);
+    outer->addWidget(m_remoteMedia);
+
+    auto *remoteHint = new QLabel(i18n("Off by default so the preview stays fully offline. Enable to let images load over http(s)."), this);
+    remoteHint->setWordWrap(true);
+    remoteHint->setEnabled(false);
+    outer->addWidget(remoteHint);
+
     outer->addStretch();
 
     reset();
 
+    connect(m_remoteMedia, &QCheckBox::toggled, this, [this]() { Q_EMIT changed(); });
     connect(m_mode, &QComboBox::currentIndexChanged, this, [this]() {
         syncEnabled();
         Q_EMIT changed();
@@ -73,6 +84,7 @@ void ConfigPage::apply()
     Settings *s = Settings::self();
     s->setMode(static_cast<Settings::Mode>(m_mode->currentData().toInt()));
     s->setGhVariant(static_cast<Settings::GhVariant>(m_variant->currentData().toInt()));
+    s->setLoadRemoteMedia(m_remoteMedia->isChecked());
 }
 
 void ConfigPage::reset()
@@ -80,6 +92,7 @@ void ConfigPage::reset()
     Settings *s = Settings::self();
     m_mode->setCurrentIndex(m_mode->findData(s->mode()));
     m_variant->setCurrentIndex(m_variant->findData(s->ghVariant()));
+    m_remoteMedia->setChecked(s->loadRemoteMedia());
     syncEnabled();
 }
 
@@ -87,5 +100,6 @@ void ConfigPage::defaults()
 {
     m_mode->setCurrentIndex(m_mode->findData(Settings::GitHub));
     m_variant->setCurrentIndex(m_variant->findData(Settings::Auto));
+    m_remoteMedia->setChecked(false);
     syncEnabled();
 }

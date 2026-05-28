@@ -34,6 +34,7 @@ void Settings::load()
     } else {
         m_ghVariant = Auto;
     }
+    m_loadRemoteMedia = cfg.readEntry("LoadRemoteMedia", false);
 }
 
 void Settings::save() const
@@ -42,6 +43,7 @@ void Settings::save() const
     cfg.writeEntry("Theme", m_mode == Application ? QStringLiteral("application") : QStringLiteral("github"));
     const char *variant = m_ghVariant == Light ? "light" : m_ghVariant == Dark ? "dark" : "auto";
     cfg.writeEntry("GithubVariant", QString::fromLatin1(variant));
+    cfg.writeEntry("LoadRemoteMedia", m_loadRemoteMedia);
     cfg.sync();
 }
 
@@ -61,6 +63,16 @@ void Settings::setGhVariant(GhVariant variant)
         return;
     }
     m_ghVariant = variant;
+    save();
+    Q_EMIT changed();
+}
+
+void Settings::setLoadRemoteMedia(bool enabled)
+{
+    if (m_loadRemoteMedia == enabled) {
+        return;
+    }
+    m_loadRemoteMedia = enabled;
     save();
     Q_EMIT changed();
 }
