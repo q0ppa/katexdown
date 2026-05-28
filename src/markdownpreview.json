@@ -1,0 +1,17 @@
+{
+    "KPlugin": {
+        "Id": "markdownpreviewplugin",
+        "Name": "Markdown Preview (GitHub)",
+        "Description": "Open a GitHub-styled Markdown preview in a new tab, with a toggle between GitHub colors and the active editor/system theme.",
+        "Icon": "text-markdown",
+        "Category": "Editor",
+        "License": "GPL-3.0-or-later",
+        "Version": "0.1.0",
+        "Authors": [
+            {
+                "Name": "uwuclxdy",
+                "Email": "uwuclxdy@pm.me"
+            }
+        ]
+    }
+}

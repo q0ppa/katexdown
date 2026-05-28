@@ -1,0 +1,49 @@
+#pragma once
+
+#include <QObject>
+
+/**
+ * Plugin-wide settings, persisted in the application's KSharedConfig under the
+ * group "MarkdownPreview". A single instance broadcasts changed() so every open
+ * preview re-themes at once.
+ */
+class Settings : public QObject
+{
+    Q_OBJECT
+public:
+    enum Mode {
+        GitHub,      // GitHub's own light/dark palette
+        Application, // match the active editor/system theme
+    };
+    enum GhVariant {
+        Auto,  // follow the application palette (dark vs light)
+        Light,
+        Dark,
+    };
+
+    static Settings *self();
+
+    Mode mode() const
+    {
+        return m_mode;
+    }
+    GhVariant ghVariant() const
+    {
+        return m_ghVariant;
+    }
+
+    void setMode(Mode mode);
+    void setGhVariant(GhVariant variant);
+
+    void load();
+    void save() const;
+
+Q_SIGNALS:
+    void changed();
+
+private:
+    explicit Settings(QObject *parent = nullptr);
+
+    Mode m_mode = GitHub;
+    GhVariant m_ghVariant = Auto;
+};

@@ -1,0 +1,14 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+  <qresource prefix="/markdownpreview">
+    <file>preview.html</file>
+    <file>css/github-markdown.css</file>
+    <file>css/base.css</file>
+    <file>css/hljs-github.min.css</file>
+    <file>css/hljs-github-dark.min.css</file>
+    <file>js/markdown-it.min.js</file>
+    <file>js/highlight.min.js</file>
+    <file>js/preview.js</file>
+    <file>ui.rc</file>
+  </qresource>
+</RCC>
