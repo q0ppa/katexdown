@@ -8,9 +8,12 @@
 #include <QUrl>
 
 #include <KActionCollection>
+#include <KConfigGroup>
 #include <KLocalizedString>
 #include <KXMLGUIFactory>
+#include <KTextEditor/Application>
 #include <KTextEditor/Document>
+#include <KTextEditor/Editor>
 #include <KTextEditor/MainWindow>
 #include <KTextEditor/View>
 
@@ -81,25 +84,71 @@ void PluginView::showPreview()
     if (!view) {
         return;
     }
-    KTextEditor::Document *doc = view->document();
+    if (PreviewWidget *preview = openPreview(view->document(), view)) {
+        m_mainWindow->activateWidget(preview);
+    }
+}
 
-    auto existing = m_previews.value(doc);
-    if (existing) {
-        m_mainWindow->activateWidget(existing);
-        return;
+PreviewWidget *PluginView::openPreview(KTextEditor::Document *doc, KTextEditor::View *view)
+{
+    if (!doc) {
+        return nullptr;
+    }
+    if (PreviewWidget *existing = m_previews.value(doc)) {
+        return existing;
     }
 
     auto *preview = new PreviewWidget(m_mainWindow, view, doc);
     if (!m_mainWindow->addWidget(preview)) {
         delete preview;
-        return;
+        return nullptr;
     }
-    m_mainWindow->activateWidget(preview);
     m_previews.insert(doc, preview);
 
     connect(doc, &QObject::destroyed, this, [this, doc]() {
         m_previews.remove(doc);
     });
+    return preview;
+}
+
+KTextEditor::View *PluginView::viewForDocument(KTextEditor::Document *doc) const
+{
+    const auto views = m_mainWindow->views();
+    for (KTextEditor::View *view : views) {
+        if (view->document() == doc) {
+            return view;
+        }
+    }
+    return nullptr;
+}
+
+void PluginView::writeSessionConfig(KConfigGroup &config)
+{
+    QStringList urls;
+    for (auto it = m_previews.constBegin(); it != m_previews.constEnd(); ++it) {
+        if (!it.value()) {
+            continue;
+        }
+        const QUrl url = it.key()->url();
+        if (!url.isEmpty()) {
+            urls << url.toString();
+        }
+    }
+    config.writeEntry("previews", urls);
+}
+
+void PluginView::readSessionConfig(const KConfigGroup &config)
+{
+    KTextEditor::Application *app = KTextEditor::Editor::instance()->application();
+    if (!app) {
+        return;
+    }
+    const QStringList urls = config.readEntry("previews", QStringList());
+    for (const QString &s : urls) {
+        if (KTextEditor::Document *doc = app->findUrl(QUrl(s))) {
+            openPreview(doc, viewForDocument(doc));
+        }
+    }
 }
 
 void PluginView::onWidgetRemoved(QWidget *widget)
