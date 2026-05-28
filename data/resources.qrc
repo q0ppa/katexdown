@@ -8,6 +8,7 @@
     <file>css/hljs-github-dark.min.css</file>
     <file>js/markdown-it.min.js</file>
     <file>js/highlight.min.js</file>
+    <file>js/js-yaml.min.js</file>
     <file>js/preview.js</file>
     <file>ui.rc</file>
   </qresource>
