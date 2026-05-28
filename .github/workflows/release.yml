@@ -1,0 +1,58 @@
+# Cut a GitHub Release on every v* tag push. Releases exist purely as version markers: the
+# plugin's in-app update check (Settings -> Markdown Preview) compares the installed version
+# against the latest release tag. Nothing is built or attached here — the install paths are the
+# AUR package and build-from-source, never a release download.
+#
+# Tagging discipline: the tag must match project(VERSION) in CMakeLists.txt (and the Version in
+# src/markdownpreview.json), otherwise the in-app check reports a phantom update. The job hard
+# fails on a mismatch so a stale version bump can't ship.
+#
+# actions/checkout is SHA-pinned because this workflow runs with a write-scoped GITHUB_TOKEN.
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: verify tag matches project version
+        run: |
+          set -Eeuo pipefail
+          proj=$(grep -oP '^project\([^)]*VERSION\s+\K[0-9.]+' CMakeLists.txt)
+          if [ "v$proj" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match CMake project version v$proj"
+            exit 1
+          fi
+
+      - name: create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          tag="$GITHUB_REF_NAME"
+          # Pre-release versions (v1.2.0-rc1, v1.2.0-beta) carry a hyphen; mark them so the
+          # update check can ignore them as "latest" until a final tag lands.
+          prerelease=""
+          case "$tag" in *-*) prerelease="--prerelease" ;; esac
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $tag already exists; nothing to do"
+            exit 0
+          fi
+          gh release create "$tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$tag" \
+            $prerelease

@@ -19,6 +19,7 @@ find_package(Qt6 ${QT_MIN_VERSION} REQUIRED COMPONENTS
     Core
     Gui
     Widgets
+    Network
     WebEngineWidgets
 )
 
@@ -44,10 +45,15 @@ kcoreaddons_add_plugin(markdownpreviewplugin
 
 target_include_directories(markdownpreviewplugin PRIVATE src)
 
+target_compile_definitions(markdownpreviewplugin PRIVATE
+    MARKDOWNPREVIEW_VERSION="${PROJECT_VERSION}"
+)
+
 target_link_libraries(markdownpreviewplugin PRIVATE
     Qt6::Core
     Qt6::Gui
     Qt6::Widgets
+    Qt6::Network
     Qt6::WebEngineWidgets
     KF6::TextEditor
     KF6::CoreAddons

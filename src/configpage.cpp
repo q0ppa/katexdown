@@ -4,11 +4,47 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QFormLayout>
+#include <QHBoxLayout>
 #include <QIcon>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QLabel>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QPushButton>
+#include <QUrl>
 #include <QVBoxLayout>
 
 #include <KLocalizedString>
+
+namespace
+{
+const QString repoUrl = QStringLiteral("https://github.com/uwuclxdy/kate-markdown-preview");
+
+QString currentVersion()
+{
+    return QStringLiteral(MARKDOWNPREVIEW_VERSION);
+}
+
+// Compare dotted numeric versions ("0.10.0" > "0.9.1"). Returns -1/0/1. Any non-numeric
+// suffix on a part is dropped by toInt(), which is fine: /releases/latest never returns a
+// pre-release tag, so the inputs here are plain x.y.z.
+int compareVersions(const QString &a, const QString &b)
+{
+    const QStringList pa = a.split(QLatin1Char('.'));
+    const QStringList pb = b.split(QLatin1Char('.'));
+    const int n = pa.size() > pb.size() ? pa.size() : pb.size();
+    for (int i = 0; i < n; ++i) {
+        const int va = i < pa.size() ? pa.at(i).toInt() : 0;
+        const int vb = i < pb.size() ? pb.at(i).toInt() : 0;
+        if (va != vb) {
+            return va < vb ? -1 : 1;
+        }
+    }
+    return 0;
+}
+} // namespace
 
 ConfigPage::ConfigPage(QWidget *parent)
     : KTextEditor::ConfigPage(parent)
@@ -44,6 +80,19 @@ ConfigPage::ConfigPage(QWidget *parent)
     remoteHint->setEnabled(false);
     outer->addWidget(remoteHint);
 
+    m_net = new QNetworkAccessManager(this);
+
+    auto *updateRow = new QHBoxLayout();
+    m_checkButton = new QPushButton(i18n("Check for updates"), this);
+    m_checkButton->setIcon(QIcon::fromTheme(QStringLiteral("system-software-update")));
+    updateRow->addWidget(m_checkButton);
+    m_updateStatus = new QLabel(i18n("Installed version: %1", currentVersion()), this);
+    m_updateStatus->setTextFormat(Qt::RichText);
+    m_updateStatus->setOpenExternalLinks(true);
+    m_updateStatus->setTextInteractionFlags(Qt::TextBrowserInteraction);
+    updateRow->addWidget(m_updateStatus, 1);
+    outer->addLayout(updateRow);
+
     outer->addStretch();
 
     reset();
@@ -56,6 +105,7 @@ ConfigPage::ConfigPage(QWidget *parent)
     connect(m_variant, &QComboBox::currentIndexChanged, this, [this]() {
         Q_EMIT changed();
     });
+    connect(m_checkButton, &QPushButton::clicked, this, &ConfigPage::checkForUpdates);
 }
 
 QString ConfigPage::name() const
@@ -77,6 +127,46 @@ void ConfigPage::syncEnabled()
 {
     const bool github = m_mode->currentData().toInt() == Settings::GitHub;
     m_variant->setEnabled(github);
+}
+
+void ConfigPage::checkForUpdates()
+{
+    m_checkButton->setEnabled(false);
+    m_updateStatus->setText(i18n("Checking…"));
+
+    QNetworkRequest req(QUrl(QStringLiteral("https://api.github.com/repos/uwuclxdy/kate-markdown-preview/releases/latest")));
+    req.setRawHeader("Accept", "application/vnd.github+json");
+    req.setRawHeader("User-Agent", "kate-markdown-preview");
+    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+
+    QNetworkReply *reply = m_net->get(req);
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        m_checkButton->setEnabled(true);
+
+        if (reply->error() != QNetworkReply::NoError) {
+            m_updateStatus->setText(i18n("Update check failed: %1", reply->errorString()));
+            return;
+        }
+
+        const QJsonObject obj = QJsonDocument::fromJson(reply->readAll()).object();
+        const QString tag = obj.value(QStringLiteral("tag_name")).toString();
+        if (tag.isEmpty()) {
+            m_updateStatus->setText(i18n("Update check failed: no published release found."));
+            return;
+        }
+
+        const QString latest = tag.startsWith(QLatin1Char('v')) ? tag.mid(1) : tag;
+        if (compareVersions(latest, currentVersion()) > 0) {
+            QString url = obj.value(QStringLiteral("html_url")).toString();
+            if (url.isEmpty()) {
+                url = repoUrl + QStringLiteral("/releases/latest");
+            }
+            m_updateStatus->setText(i18n("Update available: %1 (installed %2). <a href=\"%3\">Release notes</a>", tag, currentVersion(), url));
+        } else {
+            m_updateStatus->setText(i18n("Up to date (installed %1).", currentVersion()));
+        }
+    });
 }
 
 void ConfigPage::apply()

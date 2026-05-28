@@ -4,6 +4,9 @@
 
 class QCheckBox;
 class QComboBox;
+class QLabel;
+class QPushButton;
+class QNetworkAccessManager;
 
 /**
  * Settings page shown under Kate's plugin configuration: choose between GitHub
@@ -25,8 +28,12 @@ public:
 
 private:
     void syncEnabled();
+    void checkForUpdates();
 
     QComboBox *m_mode = nullptr;
     QComboBox *m_variant = nullptr;
     QCheckBox *m_remoteMedia = nullptr;
+    QPushButton *m_checkButton = nullptr;
+    QLabel *m_updateStatus = nullptr;
+    QNetworkAccessManager *m_net = nullptr;
 };

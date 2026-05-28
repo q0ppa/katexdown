@@ -88,6 +88,7 @@ jobs:
           chmod 600 ~/.ssh/config
 
           pkgver=$(awk -F= '/^pkgver=/{print $2; exit}' aur/PKGBUILD)
+          new_pkgrel=$(awk -F= '/^pkgrel=/{print $2; exit}' aur/PKGBUILD)
           src="$GITHUB_WORKSPACE/aur"
           work=$(mktemp -d)
 
@@ -99,8 +100,15 @@ jobs:
           git remote add aur "ssh://aur@aur.archlinux.org/kate-markdown-preview-git.git"
           # Base on existing AUR history when the package already exists so the push is a clean
           # fast-forward; otherwise start fresh (legitimate first publish creates the package).
+          # A -git package recomputes pkgver() on the user's machine at build time, so the static
+          # pkgver/.SRCINFO is meaningless churn — only republish on first import or a pkgrel bump.
           if git fetch -q aur master 2>/dev/null; then
             git checkout -q -b master FETCH_HEAD
+            old_pkgrel=$(awk -F= '/^pkgrel=/{print $2; exit}' PKGBUILD)
+            if [ "$old_pkgrel" = "$new_pkgrel" ]; then
+              echo "pkgrel unchanged ($old_pkgrel); nothing to publish"
+              exit 0
+            fi
           else
             git checkout -q -b master
           fi
@@ -111,5 +119,5 @@ jobs:
             echo "AUR already up to date"
             exit 0
           fi
-          git commit -q -m "update to $pkgver"
+          git commit -q -m "update AUR package"
           git push aur HEAD:master
