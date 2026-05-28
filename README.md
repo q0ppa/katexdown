@@ -1,6 +1,6 @@
 <div align="center">
 
-# Katdown
+# Katdown - Kate Markdown Preview
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 &nbsp;![KDE Frameworks 6](https://img.shields.io/badge/KDE%20Frameworks-6-1d99f3?logo=kde&logoColor=white)
@@ -11,7 +11,7 @@
 KDE Kate plugin for viewing GitHub-styled preview of Markdown files with live updates. Supports both GitHub's own colors and also your active editor/system theme.
 
 > [!NOTE]
-> It's vibecoded. (but it works better than anything else!)
+> It's vibecoded. (it works better than anything else tho)
 
 ## Screenshots
 
