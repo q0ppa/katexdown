@@ -3,6 +3,7 @@
 #include <QHash>
 #include <QObject>
 #include <QPointer>
+#include <QSet>
 
 #include <KXMLGUIClient>
 #include <KTextEditor/SessionConfigInterface>
@@ -37,6 +38,8 @@ private Q_SLOTS:
     void showPreview();
     void updateActionState();
     void onWidgetRemoved(QWidget *widget);
+    void restorePendingPreviews();
+    void onDocumentCreated();
 
 private:
     bool currentIsMarkdown() const;
@@ -46,4 +49,5 @@ private:
     KTextEditor::MainWindow *m_mainWindow = nullptr;
     QAction *m_action = nullptr;
     QHash<KTextEditor::Document *, QPointer<PreviewWidget>> m_previews;
+    QSet<QString> m_pendingPreviews;
 };

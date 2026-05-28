@@ -5,6 +5,8 @@
 #include <QFile>
 #include <QIcon>
 #include <QKeySequence>
+#include <QSet>
+#include <QTimer>
 #include <QUrl>
 
 #include <KActionCollection>
@@ -139,15 +141,41 @@ void PluginView::writeSessionConfig(KConfigGroup &config)
 
 void PluginView::readSessionConfig(const KConfigGroup &config)
 {
-    KTextEditor::Application *app = KTextEditor::Editor::instance()->application();
-    if (!app) {
+    const QStringList urls = config.readEntry("previews", QStringList());
+    m_pendingPreviews = QSet<QString>(urls.cbegin(), urls.cend());
+    if (m_pendingPreviews.isEmpty()) {
         return;
     }
-    const QStringList urls = config.readEntry("previews", QStringList());
-    for (const QString &s : urls) {
-        if (KTextEditor::Document *doc = app->findUrl(QUrl(s))) {
+    // Kate restores plugin session config before (and around) its documents, so the
+    // documents we want previews for usually don't exist yet at this point. Defer the
+    // lookup to the next event-loop turn and keep watching for documents created later
+    // until every saved preview has been matched.
+    if (KTextEditor::Application *app = KTextEditor::Editor::instance()->application()) {
+        connect(app, &KTextEditor::Application::documentCreated, this, &PluginView::onDocumentCreated, Qt::UniqueConnection);
+    }
+    QTimer::singleShot(0, this, &PluginView::restorePendingPreviews);
+}
+
+void PluginView::onDocumentCreated()
+{
+    // A freshly created document may not have its URL set yet; re-scan next turn.
+    QTimer::singleShot(0, this, &PluginView::restorePendingPreviews);
+}
+
+void PluginView::restorePendingPreviews()
+{
+    KTextEditor::Application *app = KTextEditor::Editor::instance()->application();
+    if (!app || m_pendingPreviews.isEmpty()) {
+        return;
+    }
+    const auto docs = app->documents();
+    for (KTextEditor::Document *doc : docs) {
+        if (m_pendingPreviews.remove(doc->url().toString())) {
             openPreview(doc, viewForDocument(doc));
         }
+    }
+    if (m_pendingPreviews.isEmpty()) {
+        disconnect(app, &KTextEditor::Application::documentCreated, this, &PluginView::onDocumentCreated);
     }
 }
 
