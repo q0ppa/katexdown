@@ -31,6 +31,23 @@ yay -S katdown-git   # or: paru -S katdown-git
 
 The package builds from the latest commit and pulls in every dependency. Then enable it: Settings, then Configure Kate, then Plugins, then check Katdown.
 
+### Windows
+
+Grab `katdown-<version>-windows-x86_64.zip` from the [latest release](https://github.com/uwuclxdy/katdown/releases/latest), unzip it, close Kate, and run this in an **elevated** PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install.ps1
+```
+
+It finds Kate on its own, or takes `-KateDir "D:\Kate"`. `-WhatIf` shows what it would do, `-Uninstall` removes exactly what it installed. Then enable it: Settings, then Configure Kate, then Plugins, then check Katdown.
+
+The zip is large (~240 MB) because Kate for Windows ships no Qt WebEngine, and the preview is a web view, so the runtime comes along with the plugin. Windows resolves a plugin's dependencies from the folder holding `kate.exe`, which is why those files install next to Kate rather than beside the plugin.
+
+Two limits worth knowing before you download it:
+
+- Kate has to come from the [installer](https://kate-editor.org/get-it/), not the Microsoft Store. Store installs live in a directory Windows locks down, so nothing can add a plugin to them.
+- The build targets Kate's Qt 6.11.x. `install.ps1` checks and refuses on a mismatch, because installing anyway produces a plugin that never loads and never says why.
+
 ### Build from source
 
 ```bash
@@ -75,6 +92,8 @@ On Arch:
 sudo pacman -S --needed base-devel cmake extra-cmake-modules \
     ktexteditor qt6-webengine kcoreaddons ki18n kconfig kxmlgui ksyntaxhighlighting
 ```
+
+Building it yourself on Windows means [KDE Craft](https://community.kde.org/Craft) with MSVC 2022, since the plugin has to match the ABI of Kate's own build and Kate ships no headers. `.github/workflows/windows.yml` is the working recipe.
 
 ## Why this exists
 
