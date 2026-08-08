@@ -1,0 +1,194 @@
+# Build the Windows plugin and package it with the Qt WebEngine runtime Kate for Windows does not
+# ship. Kate's own build is Craft-made (MSVC 2022, Qt 6.11.1, KF 6.28.0), so this uses the same
+# Craft binary cache to get an ABI-identical plugin; nothing compiles from source except src/*.cpp.
+#
+# Why this is not on every push: one run pulls a couple of GB of prebuilt Qt and Chromium from
+# files.kde.org. It runs on tags (to attach the release artifact), on changes to the build inputs,
+# and on demand.
+#
+# --ci-mode is load-bearing, not decoration: without it a hash mismatch on a mirror-served archive
+# drops Craft into an interactive prompt that dies with EOFError on a runner.
+#
+# actions/checkout is SHA-pinned because the tag path runs with a write-scoped GITHUB_TOKEN.
+
+name: windows
+
+on:
+  push:
+    tags:
+      - 'v*'
+    paths:
+      - 'src/**'
+      - 'data/**'
+      - 'CMakeLists.txt'
+      - 'packaging/windows/**'
+      - '.github/workflows/windows.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'data/**'
+      - 'CMakeLists.txt'
+      - 'packaging/windows/**'
+      - '.github/workflows/windows.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write  # only used by the release-upload step, which is tag-gated
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: bootstrap craft
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Join-Path $env:RUNNER_TEMP 'install_craft.ps1'
+          Invoke-WebRequest -Uri 'https://invent.kde.org/packaging/craft/-/raw/master/setup/install_craft.ps1' -OutFile $installer
+          # -use-defaults picks msvc2022 + x86_64 with no prompts. It is a param() script, so it has
+          # to be invoked as a file; piping it to iex cannot pass arguments.
+          & $installer -use-defaults -root C:\CraftRoot
+          if (-not (Test-Path 'C:\CraftRoot\craft\craftenv.ps1')) {
+            throw 'craft bootstrap produced no craftenv.ps1'
+          }
+
+      - name: verify craft abi
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Read the setting the bootstrap wrote rather than parsing craftenv's banner: the plugin
+          # has to match Kate's own ABI exactly or it silently never loads, so this fails the run
+          # instead of shipping a DLL nobody can use.
+          $abi = (Select-String -Path C:\CraftRoot\etc\CraftSettings.ini -Pattern '^\s*ABI\s*=\s*(\S+)').Matches.Groups[1].Value
+          Write-Host "craft ABI: $abi"
+          if ($abi -ne 'windows-cl-msvc2022-x86_64') {
+            throw "craft ABI is '$abi', expected windows-cl-msvc2022-x86_64"
+          }
+
+      - name: install dependencies from cache
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . C:\CraftRoot\craft\craftenv.ps1
+          # 'qtwebengine' alone is ambiguous, Craft carries a Qt5 and a Qt6 blueprint under that
+          # name. Craft's own downloader has been seen hanging on large mirror-served archives, so
+          # give it a couple of attempts before calling the run bad.
+          $ok = $false
+          foreach ($attempt in 1..3) {
+            Write-Host "craft attempt $attempt"
+            craft --ci-mode --use-cache ktexteditor libs/qt6/qtwebengine
+            if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+            Write-Warning "craft exited $LASTEXITCODE, retrying"
+          }
+          if (-not $ok) { throw 'craft failed to install dependencies' }
+          foreach ($dll in @('C:\CraftRoot\bin\KF6TextEditor.dll', 'C:\CraftRoot\bin\Qt6WebEngineCore.dll')) {
+            if (-not (Test-Path $dll)) { throw "missing after install: $dll" }
+          }
+
+      - name: build
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . C:\CraftRoot\craft\craftenv.ps1
+          cmake -B build -S . -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_PREFIX_PATH=C:/CraftRoot -DBUILD_TESTING=ON
+          if ($LASTEXITCODE -ne 0) { throw 'cmake configure failed' }
+          cmake --build build
+          if ($LASTEXITCODE -ne 0) { throw 'build failed' }
+
+      - name: package
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . C:\CraftRoot\craft\craftenv.ps1
+          $match = Select-String -Path CMakeLists.txt -Pattern '^project\(.*VERSION\s+([0-9.]+)'
+          if (-not $match) { throw 'could not read the project version out of CMakeLists.txt' }
+          $version = $match.Matches[0].Groups[1].Value
+          .\packaging\windows\make-payload.ps1 `
+            -CraftRoot C:\CraftRoot `
+            -PluginDll build\bin\kf6\ktexteditor\katdown.dll `
+            -OutDir dist `
+            -Zip "dist\katdown-$version-windows-x86_64.zip"
+          Get-ChildItem dist\*.zip | ForEach-Object { "{0}  {1:N0} bytes" -f $_.Name, $_.Length }
+
+      # The packaged artifact is verified against a REAL Kate install, not against Craft's own
+      # complete Qt. That distinction is the whole value of this step: the payload once shipped
+      # without v8_context_snapshot.bin, and every check that ran against Craft's tree passed,
+      # because Craft's tree has the file. Only a render inside a Kate install can catch a data
+      # file the payload forgot.
+      - name: verify the artifact against a real Kate
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = 'https://cdn.kde.org/ci-builds/utilities/kate/release-26.04/windows/'
+          # Resolve the current build rather than pinning one: KDE's CI retention rotates old
+          # builds off and a pinned URL 404s a few weeks later. Picking the newest also makes this
+          # job the canary for Kate moving to a Qt the payload no longer matches.
+          $page = Invoke-WebRequest -Uri $dir -UseBasicParsing
+          $names = [regex]::Matches($page.Content, 'kate-release_[0-9.]+-(\d+)-windows-cl-msvc2022-x86_64\.exe') |
+            ForEach-Object { [pscustomobject]@{ name = $_.Value; build = [int]$_.Groups[1].Value } } |
+            Sort-Object build -Descending
+          if (-not $names) { throw "no Kate installer found at $dir" }
+          $installer = Join-Path $env:RUNNER_TEMP $names[0].name
+          Write-Host "using $($names[0].name)"
+          Invoke-WebRequest -Uri ($dir + $names[0].name) -OutFile $installer
+          Start-Process -FilePath $installer -ArgumentList '/S' -Wait
+          $kate = 'C:\Program Files\Kate'
+          if (-not (Test-Path "$kate\bin\kate.exe")) { throw "Kate did not install to $kate" }
+          Write-Host ("Kate's Qt: " + (Get-Item "$kate\bin\Qt6Core.dll").VersionInfo.FileVersion)
+
+          # install.ps1 throws on failure rather than setting an exit code, and
+          # $ErrorActionPreference is Stop, so a failure fails the step on its own. Do not add a
+          # $LASTEXITCODE check here: it still holds the last NATIVE command's code and would
+          # report a stale failure.
+          & .\dist\install.ps1 -KateDir $kate
+
+          Copy-Item build\bin\previewlifecycletest.exe "$kate\bin\" -Force
+          $env:QT_QPA_PLATFORM = 'offscreen'
+          $env:QTWEBENGINE_CHROMIUM_FLAGS = '--disable-gpu --no-sandbox'
+          # Resolve everything from Kate's directory, so CraftRoot cannot quietly backstop a file
+          # the payload is missing.
+          $env:PATH = "$kate\bin;$env:SystemRoot\system32;$env:SystemRoot"
+          Push-Location "$kate\bin"
+          try {
+            $proc = Start-Process -FilePath "$kate\bin\previewlifecycletest.exe" -NoNewWindow -Wait -PassThru
+            $code = $proc.ExitCode
+          } finally {
+            Pop-Location
+          }
+          # Chromium writes its fatal diagnostics here rather than to stdout, so print it before
+          # deciding anything: an empty debug.log is part of the pass evidence.
+          if (Test-Path "$kate\bin\debug.log") {
+            Write-Host '--- debug.log ---'
+            Get-Content "$kate\bin\debug.log"
+          }
+          if ($code -ne 0) { throw "previewlifecycletest exited $code against the packaged install" }
+          Write-Host 'render test passed against the packaged Kate install'
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: katdown-windows-x86_64
+          path: dist/*.zip
+          if-no-files-found: error
+
+      - name: attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = $env:GITHUB_REF_NAME
+          # release.yml creates the release on the same tag push, so this can win the race. Wait for
+          # it rather than creating a second, competing release.
+          $found = $false
+          foreach ($attempt in 1..20) {
+            gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) { $found = $true; break }
+            Start-Sleep -Seconds 15
+          }
+          if (-not $found) { throw "release $tag never appeared; is release.yml failing?" }
+          gh release upload $tag (Get-ChildItem dist\*.zip).FullName --repo $env:GITHUB_REPOSITORY --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'upload failed' }
