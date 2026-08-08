@@ -62,3 +62,7 @@ target_link_libraries(katdown PRIVATE
     KF6::XmlGui
     KF6::SyntaxHighlighting
 )
+
+if(BUILD_TESTING)
+    add_subdirectory(tests)
+endif()
