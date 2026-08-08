@@ -14,15 +14,12 @@
 name: windows
 
 on:
+  # No paths filter on the tag trigger. GitHub ANDs branches/tags with paths, so a release tag
+  # landing on a commit that happened not to touch src/ would skip this job and publish a release
+  # with no Windows artifact, silently.
   push:
     tags:
       - 'v*'
-    paths:
-      - 'src/**'
-      - 'data/**'
-      - 'CMakeLists.txt'
-      - 'packaging/windows/**'
-      - '.github/workflows/windows.yml'
   pull_request:
     paths:
       - 'src/**'
