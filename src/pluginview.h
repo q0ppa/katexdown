@@ -38,16 +38,21 @@ private Q_SLOTS:
     void showPreview();
     void updateActionState();
     void onWidgetRemoved(QWidget *widget);
-    void restorePendingPreviews();
+    void rescanDocuments();
     void onDocumentCreated();
+    void onDocumentWillBeDeleted(KTextEditor::Document *doc);
 
 private:
     bool currentIsMarkdown() const;
     PreviewWidget *openPreview(KTextEditor::Document *doc, KTextEditor::View *view);
     KTextEditor::View *viewForDocument(KTextEditor::Document *doc) const;
+    void trackPreview(KTextEditor::Document *doc, PreviewWidget *preview);
+    void watchApplication();
 
     KTextEditor::MainWindow *m_mainWindow = nullptr;
     QAction *m_action = nullptr;
     QHash<KTextEditor::Document *, QPointer<PreviewWidget>> m_previews;
+    // Previews whose document was closed, keyed by the url they re-attach to.
+    QHash<QString, QPointer<PreviewWidget>> m_detached;
     QSet<QString> m_pendingPreviews;
 };

@@ -289,8 +289,6 @@ public:
 PreviewWidget::PreviewWidget(KTextEditor::MainWindow *mainWindow, KTextEditor::View *view, KTextEditor::Document *doc, QWidget *parent)
     : QWidget(parent)
     , m_mainWindow(mainWindow)
-    , m_doc(doc)
-    , m_view(view)
 {
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
@@ -330,18 +328,59 @@ PreviewWidget::PreviewWidget(KTextEditor::MainWindow *mainWindow, KTextEditor::V
         render();
     });
 
-    if (m_doc) {
-        connect(m_doc, &KTextEditor::Document::textChanged, this, &PreviewWidget::scheduleRender);
-        connect(m_doc, &KTextEditor::Document::documentUrlChanged, this, &PreviewWidget::updateTitle);
-        connect(m_doc, &KTextEditor::Document::documentUrlChanged, this, &PreviewWidget::loadPage);
-    }
     connect(Settings::self(), &Settings::changed, this, &PreviewWidget::applyTheme);
     connect(Settings::self(), &Settings::changed, this, &PreviewWidget::applyMediaPolicy);
 
-    updateTitle();
     setWindowIcon(QIcon::fromTheme(QStringLiteral("text-markdown")));
     applyMediaPolicy();
-    loadPage();
+    attachDocument(doc, view);
+}
+
+void PreviewWidget::attachDocument(KTextEditor::Document *doc, KTextEditor::View *view)
+{
+    if (doc && m_doc == doc) {
+        return;
+    }
+    if (m_doc) {
+        m_doc->disconnect(this);
+    }
+    m_doc = doc;
+    m_view = view;
+    m_bufferStale = false;
+    if (doc) {
+        connect(doc, &KTextEditor::Document::textChanged, this, &PreviewWidget::scheduleRender);
+        connect(doc, &KTextEditor::Document::documentUrlChanged, this, &PreviewWidget::onDocumentUrlChanged);
+        connect(doc, &KTextEditor::Document::aboutToClose, this, &PreviewWidget::snapshotSource);
+    }
+    loadPage(); // refreshes m_url, which updateTitle() reads
+    updateTitle();
+}
+
+// Freeze on the mirrored source. Called when the document is about to be deleted,
+// which on the multi-tab close path is the only warning that arrives at all.
+void PreviewWidget::detachDocument()
+{
+    if (!m_doc) {
+        return;
+    }
+    if (!m_bufferStale) {
+        m_text = m_doc->text();
+    }
+    m_doc->disconnect(this);
+    m_doc = nullptr;
+    m_view = nullptr;
+    m_debounce->stop();
+    updateTitle();
+}
+
+// aboutToClose is the last moment the buffer still holds the document's text;
+// closeUrl() empties it immediately afterwards.
+void PreviewWidget::snapshotSource()
+{
+    if (m_doc) {
+        m_text = m_doc->text();
+        m_bufferStale = true;
+    }
 }
 
 // Teardown order matters: the view (and its page) must die before the profile, and the
@@ -375,18 +414,34 @@ QString PreviewWidget::buildHtml()
 
 QUrl PreviewWidget::baseUrl() const
 {
-    if (m_doc && m_doc->url().isLocalFile()) {
-        return m_doc->url().adjusted(QUrl::RemoveFilename);
+    if (m_url.isLocalFile()) {
+        return m_url.adjusted(QUrl::RemoveFilename);
     }
     return QUrl(QStringLiteral("qrc:/katdown/"));
 }
 
 void PreviewWidget::loadPage()
 {
-    const QString root = (m_doc && m_doc->url().isLocalFile()) ? QFileInfo(m_doc->url().toLocalFile()).absolutePath() : QString();
+    if (m_doc) {
+        m_url = m_doc->url();
+    }
+    const QString root = m_url.isLocalFile() ? QFileInfo(m_url.toLocalFile()).absolutePath() : QString();
     static_cast<LocalFileGuard *>(m_guard)->setRoot(root);
     m_loaded = false;
     m_web->setHtml(buildHtml(), baseUrl());
+}
+
+// Closing a document clears its url before anything announces the close, so an
+// unfiltered reload here would blank the page and drop the document folder the
+// frozen content still resolves its images against. A rename or Save As always
+// lands on a non-empty url.
+void PreviewWidget::onDocumentUrlChanged()
+{
+    if (m_doc && m_doc->url().isEmpty() && !m_url.isEmpty()) {
+        return;
+    }
+    loadPage();
+    updateTitle();
 }
 
 void PreviewWidget::openLink(const QUrl &url)
@@ -418,10 +473,14 @@ void PreviewWidget::runJs(const QString &code)
 
 void PreviewWidget::render()
 {
-    if (!m_loaded || !m_doc) {
+    if (!m_loaded) {
         return;
     }
-    runJs(QStringLiteral("window.__setMarkdown(%1);").arg(jsLiteral(m_doc->text())));
+    if (m_doc) {
+        m_text = m_doc->text();
+        m_bufferStale = false; // live content supersedes any close-time snapshot
+    }
+    runJs(QStringLiteral("window.__setMarkdown(%1);").arg(jsLiteral(m_text)));
 }
 
 void PreviewWidget::scheduleRender()
@@ -452,14 +511,8 @@ void PreviewWidget::applyTheme()
 
 void PreviewWidget::updateTitle()
 {
-    QString name = i18n("Untitled");
-    if (m_doc) {
-        const QUrl url = m_doc->url();
-        if (!url.isEmpty()) {
-            name = url.fileName();
-        }
-    }
-    setWindowTitle(i18n("Preview: %1", name));
+    const QString name = m_url.isEmpty() ? i18n("Untitled") : m_url.fileName();
+    setWindowTitle(m_doc ? i18n("Preview: %1", name) : i18n("Preview: %1 (closed)", name));
 }
 
 void PreviewWidget::changeEvent(QEvent *event)

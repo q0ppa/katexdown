@@ -25,6 +25,10 @@ class MainWindow;
  * A single Markdown preview tab: a QWebEngineView fed by a self-contained HTML
  * document. Source text is pushed to the page on every change; theming is driven
  * from the active editor theme (Application mode) or GitHub's palette.
+ *
+ * The widget outlives its document: Kate destroys the document when its editor tab
+ * closes, so the source text and url are mirrored here and the preview freezes on
+ * that copy until the same file is opened again.
  */
 class PreviewWidget : public QWidget
 {
@@ -38,6 +42,15 @@ public:
         return m_doc;
     }
 
+    // Valid after the document is gone; the tab is filed under this for re-attaching.
+    QUrl documentUrl() const
+    {
+        return m_url;
+    }
+
+    void attachDocument(KTextEditor::Document *doc, KTextEditor::View *view);
+    void detachDocument();
+
 public Q_SLOTS:
     void applyTheme();
 
@@ -47,9 +60,11 @@ protected:
 
 private Q_SLOTS:
     void scheduleRender();
-    void updateTitle();
+    void onDocumentUrlChanged();
+    void snapshotSource();
 
 private:
+    void updateTitle();
     void render();
     void runJs(const QString &code);
     void loadPage();
@@ -73,6 +88,11 @@ private:
     QPointer<KTextEditor::Document> m_doc;
     QPointer<KTextEditor::View> m_view;
     QPointer<QWidget> m_inputTarget;
+    QUrl m_url;
+    QString m_text;
     bool m_loaded = false;
     bool m_remoteApplied = false;
+    // Set once the document announced its close: its buffer gets emptied straight
+    // after, so m_text must not be refreshed from it again.
+    bool m_bufferStale = false;
 };
