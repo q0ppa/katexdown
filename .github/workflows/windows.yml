@@ -38,13 +38,32 @@ defaults:
 
 jobs:
   build:
-    runs-on: windows-latest
+    # Pinned, not windows-latest. That label now points at Windows Server 2025 with Visual Studio
+    # 2026, where Craft's bundled vswhere finds no Visual Studio at all and the bootstrap aborts.
+    # msvc2022 is also what everything else here targets: Kate's own Windows build, Craft's binary
+    # cache, and Craft's own default ABI, whose source still calls msvc2026 untested.
+    runs-on: windows-2022
     timeout-minutes: 120
     permissions:
       contents: write  # only used by the release-upload step, which is tag-gated
 
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      # Craft's own failure for a missing toolchain is "Unable to locate Visual Studio", buried in a
+      # bootstrap log, and it aborts three steps later with something unrelated. Check it here so a
+      # runner-image change says so in one line.
+      - name: verify the runner has the msvc2022 toolset
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { throw "no vswhere at $vswhere" }
+          $path = & $vswhere -property installationPath -nologo -latest -products '*' `
+            -version '[17.0,18.0)' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64
+          if (-not $path) {
+            throw 'no Visual Studio 2022 with the C++ toolset on this runner. windows-latest moved to VS 2026; this job needs the msvc2022 image.'
+          }
+          Write-Host "VS 2022 at $path"
 
       - name: bootstrap craft
         run: |
