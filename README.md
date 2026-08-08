@@ -108,6 +108,8 @@ Then trigger the preview in one of three ways:
 
 The button is greyed out unless the active tab is a Markdown document. The preview tab tracks the document and re-renders as you edit. Triggering it again focuses the existing tab instead of opening a second one.
 
+Closing the document's editor tab leaves the preview showing its last content, with `(closed)` in the tab title. Reopening the file re-attaches that same preview tab and it tracks again.
+
 ## Configuration
 
 Settings -> Configure Kate -> (Plugins -> enable `Katdown`) -> Katdown.
