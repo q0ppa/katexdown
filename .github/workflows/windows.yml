@@ -65,6 +65,22 @@ jobs:
           }
           Write-Host "VS 2022 at $path"
 
+      # Craft prints "known to cause problems with your configuration" for every foreign toolchain
+      # it finds on PATH, then fails much later and elsewhere: its msys bash picked up the runner's
+      # C:\mingw64\bin\make.exe and the pkgconf autotools build died on the mixed toolchain. Craft's
+      # own advice is to keep these off PATH, so do it once here for every later step.
+      - name: strip foreign toolchains off PATH
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bad = '\mingw64\', '\mingw32\', '\msys64\', '\Strawberry\', '\Git\bin', '\Git\usr\bin'
+          $kept = @()
+          foreach ($entry in ($env:PATH -split ';')) {
+            if (-not $entry) { continue }
+            $match = $bad | Where-Object { $entry -like "*$_*" }
+            if ($match) { Write-Host "dropping $entry" } else { $kept += $entry }
+          }
+          "PATH=$($kept -join ';')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: bootstrap craft
         run: |
           $ErrorActionPreference = 'Stop'
