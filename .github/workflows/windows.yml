@@ -123,6 +123,9 @@ jobs:
           & $env:VSDEVSH -SkipAutomaticLocation -Arch amd64 -HostArch amd64
           $env:ANDROID_SDK_ROOT = $null
           . C:\CraftRoot\craft\craftenv.ps1
+          # craftenv.ps1 leaves the shell sitting in C:\CraftRoot, so anything relative
+          # after this resolves against Craft rather than the checkout.
+          Set-Location $env:GITHUB_WORKSPACE
           # 'qtwebengine' alone is ambiguous, Craft carries a Qt5 and a Qt6 blueprint under that
           # name. Craft's own downloader has been seen hanging on large mirror-served archives, so
           # give it a couple of attempts before calling the run bad.
@@ -144,6 +147,9 @@ jobs:
           & $env:VSDEVSH -SkipAutomaticLocation -Arch amd64 -HostArch amd64
           $env:ANDROID_SDK_ROOT = $null
           . C:\CraftRoot\craft\craftenv.ps1
+          # craftenv.ps1 leaves the shell sitting in C:\CraftRoot, so anything relative
+          # after this resolves against Craft rather than the checkout.
+          Set-Location $env:GITHUB_WORKSPACE
           cmake -B build -S . -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_PREFIX_PATH=C:/CraftRoot -DBUILD_TESTING=ON
           if ($LASTEXITCODE -ne 0) { throw 'cmake configure failed' }
           cmake --build build
@@ -155,6 +161,9 @@ jobs:
           & $env:VSDEVSH -SkipAutomaticLocation -Arch amd64 -HostArch amd64
           $env:ANDROID_SDK_ROOT = $null
           . C:\CraftRoot\craft\craftenv.ps1
+          # craftenv.ps1 leaves the shell sitting in C:\CraftRoot, so anything relative
+          # after this resolves against Craft rather than the checkout.
+          Set-Location $env:GITHUB_WORKSPACE
           $match = Select-String -Path CMakeLists.txt -Pattern '^project\(.*VERSION\s+([0-9.]+)'
           if (-not $match) { throw 'could not read the project version out of CMakeLists.txt' }
           $version = $match.Matches[0].Groups[1].Value
