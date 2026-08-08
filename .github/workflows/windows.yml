@@ -32,6 +32,11 @@ on:
 permissions:
   contents: read
 
+env:
+  # Every Craft step re-enters the MSVC environment: each `run:` is its own shell, and Craft's
+  # source builds fail in confusing ways without it.
+  VSDEVSH: C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\Launch-VsDevShell.ps1
+
 defaults:
   run:
     shell: pwsh
@@ -65,33 +70,40 @@ jobs:
           }
           Write-Host "VS 2022 at $path"
 
-      # Craft prints "known to cause problems with your configuration" for every foreign toolchain
-      # it finds on PATH, then fails much later and elsewhere: its msys bash picked up the runner's
-      # C:\mingw64\bin\make.exe and the pkgconf autotools build died on the mixed toolchain. Craft's
-      # own advice is to keep these off PATH, so do it once here for every later step.
-      - name: strip foreign toolchains off PATH
+      # Craft warns about every foreign toolchain it finds, then fails much later and somewhere
+      # else: its msys bash ran the runner's C:\mingw64\bin\make.exe and the pkgconf build died on
+      # the mixed toolchain. Dropping them from PATH is not enough, since Craft's msys environment
+      # finds them by absolute path anyway, so the directories go.
+      - name: remove foreign toolchains
         run: |
           $ErrorActionPreference = 'Stop'
-          $bad = '\mingw64\', '\mingw32\', '\msys64\', '\Strawberry\', '\Git\bin', '\Git\usr\bin'
-          $kept = @()
-          foreach ($entry in ($env:PATH -split ';')) {
-            if (-not $entry) { continue }
-            $match = $bad | Where-Object { $entry -like "*$_*" }
-            if ($match) { Write-Host "dropping $entry" } else { $kept += $entry }
-          }
-          "PATH=$($kept -join ';')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Remove-Item -Path 'C:\mingw64' -Recurse -Force -ErrorAction Ignore
+          Remove-Item -Path 'C:\Strawberry' -Recurse -Force -ErrorAction Ignore
+          Remove-Item -Path 'C:\Program Files\Git\bin\sh.exe' -Force -ErrorAction Ignore
+          git config --global core.autocrlf false
 
       - name: bootstrap craft
         run: |
           $ErrorActionPreference = 'Stop'
+          # Craft source-builds its whole base stack (pkgconf, icu, gettext, python) during the
+          # bootstrap, and those builds need a live MSVC environment. Without it gettext fails to
+          # link against iconv after about an hour of work.
+          & $env:VSDEVSH -SkipAutomaticLocation -Arch amd64 -HostArch amd64
+          $env:ANDROID_SDK_ROOT = $null
+          python -m pip install --upgrade certifi
           $installer = Join-Path $env:RUNNER_TEMP 'install_craft.ps1'
           Invoke-WebRequest -Uri 'https://invent.kde.org/packaging/craft/-/raw/master/setup/install_craft.ps1' -OutFile $installer
+          Unblock-File -Path $installer
           # -use-defaults picks msvc2022 + x86_64 with no prompts. It is a param() script, so it has
           # to be invoked as a file; piping it to iex cannot pass arguments.
           & $installer -use-defaults -root C:\CraftRoot
           if (-not (Test-Path 'C:\CraftRoot\craft\craftenv.ps1')) {
             throw 'craft bootstrap produced no craftenv.ps1'
           }
+          # craftenv.ps1 opens with `cls`, which throws in a non-console host and takes the whole
+          # step with it.
+          Unblock-File -Path C:\CraftRoot\craft\craftenv.ps1
+          (Get-Content C:\CraftRoot\craft\craftenv.ps1) -replace '^cls$', '' | Set-Content C:\CraftRoot\craft\craftenv.ps1
 
       - name: verify craft abi
         run: |
@@ -108,6 +120,8 @@ jobs:
       - name: install dependencies from cache
         run: |
           $ErrorActionPreference = 'Stop'
+          & $env:VSDEVSH -SkipAutomaticLocation -Arch amd64 -HostArch amd64
+          $env:ANDROID_SDK_ROOT = $null
           . C:\CraftRoot\craft\craftenv.ps1
           # 'qtwebengine' alone is ambiguous, Craft carries a Qt5 and a Qt6 blueprint under that
           # name. Craft's own downloader has been seen hanging on large mirror-served archives, so
@@ -127,6 +141,8 @@ jobs:
       - name: build
         run: |
           $ErrorActionPreference = 'Stop'
+          & $env:VSDEVSH -SkipAutomaticLocation -Arch amd64 -HostArch amd64
+          $env:ANDROID_SDK_ROOT = $null
           . C:\CraftRoot\craft\craftenv.ps1
           cmake -B build -S . -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_PREFIX_PATH=C:/CraftRoot -DBUILD_TESTING=ON
           if ($LASTEXITCODE -ne 0) { throw 'cmake configure failed' }
@@ -136,6 +152,8 @@ jobs:
       - name: package
         run: |
           $ErrorActionPreference = 'Stop'
+          & $env:VSDEVSH -SkipAutomaticLocation -Arch amd64 -HostArch amd64
+          $env:ANDROID_SDK_ROOT = $null
           . C:\CraftRoot\craft\craftenv.ps1
           $match = Select-String -Path CMakeLists.txt -Pattern '^project\(.*VERSION\s+([0-9.]+)'
           if (-not $match) { throw 'could not read the project version out of CMakeLists.txt' }
