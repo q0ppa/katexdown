@@ -123,10 +123,16 @@ jobs:
       - name: verify the artifact against a real Kate
         run: |
           $ErrorActionPreference = 'Stop'
-          $dir = 'https://cdn.kde.org/ci-builds/utilities/kate/release-26.04/windows/'
-          # Resolve the current build rather than pinning one: KDE's CI retention rotates old
-          # builds off and a pinned URL 404s a few weeks later. Picking the newest also makes this
-          # job the canary for Kate moving to a Qt the payload no longer matches.
+          # Resolve both the release series and the build rather than pinning either. KDE's CI
+          # retention rotates old builds off, so a pinned URL 404s within weeks, and the series
+          # rolls over twice a year. Always testing against the newest Kate also makes this job the
+          # canary for Kate moving to a Qt the payload no longer matches.
+          $root = 'https://cdn.kde.org/ci-builds/utilities/kate/'
+          $series = [regex]::Matches((Invoke-WebRequest -Uri $root -UseBasicParsing).Content, 'href="(release-[0-9.]+)/"') |
+            ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
+          if (-not $series) { throw "no release-* series found at $root" }
+          $dir = $root + $series[-1] + '/windows/'
+          Write-Host "series: $($series[-1])"
           $page = Invoke-WebRequest -Uri $dir -UseBasicParsing
           $names = [regex]::Matches($page.Content, 'kate-release_[0-9.]+-(\d+)-windows-cl-msvc2022-x86_64\.exe') |
             ForEach-Object { [pscustomobject]@{ name = $_.Value; build = [int]$_.Groups[1].Value } } |

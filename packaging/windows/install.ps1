@@ -163,6 +163,23 @@ $(if ($collisions.Count -gt 10) { "  ... and $($collisions.Count - 10) more`n" }
     Write-Host "Installing Katdown into $Dir (Kate's Qt $qtVersion)"
     $written = New-Object System.Collections.Generic.List[string]
     foreach ($file in $payload) {
+        $written.Add((Get-RelativePath $PayloadDir $file.FullName))
+    }
+
+    # The manifest goes down BEFORE the copying, listing what is about to be written. A copy that
+    # dies partway (disk full, a locked DLL) would otherwise leave files behind with nothing
+    # recording them, and -Uninstall could not clean up after itself. Uninstall tolerates entries
+    # that never made it to disk.
+    $manifestPath = Join-Path $Dir $ManifestRel
+    if ($PSCmdlet.ShouldProcess($manifestPath, 'Write manifest')) {
+        $manifestDir = Split-Path -Parent $manifestPath
+        if (-not (Test-Path $manifestDir)) {
+            New-Item -ItemType Directory -Path $manifestDir -Force | Out-Null
+        }
+        Set-Content -LiteralPath $manifestPath -Value $written -Encoding UTF8
+    }
+
+    foreach ($file in $payload) {
         $rel = Get-RelativePath $PayloadDir $file.FullName
         $dest = Join-Path $Dir $rel
         $destDir = Split-Path -Parent $dest
@@ -172,7 +189,6 @@ $(if ($collisions.Count -gt 10) { "  ... and $($collisions.Count - 10) more`n" }
             }
             Copy-Item -LiteralPath $file.FullName -Destination $dest -Force
         }
-        $written.Add($rel)
     }
 
     # Stale entries from an older payload that this one no longer ships would otherwise linger
@@ -183,15 +199,6 @@ $(if ($collisions.Count -gt 10) { "  ... and $($collisions.Count - 10) more`n" }
         if ((Test-Path $path) -and $PSCmdlet.ShouldProcess($path, 'Remove (left over from a previous Katdown)')) {
             Remove-Item -LiteralPath $path -Force
         }
-    }
-
-    $manifestPath = Join-Path $Dir $ManifestRel
-    if ($PSCmdlet.ShouldProcess($manifestPath, 'Write manifest')) {
-        $manifestDir = Split-Path -Parent $manifestPath
-        if (-not (Test-Path $manifestDir)) {
-            New-Item -ItemType Directory -Path $manifestDir -Force | Out-Null
-        }
-        Set-Content -LiteralPath $manifestPath -Value $written -Encoding UTF8
     }
 
     Write-Host "Installed $($written.Count) files."
