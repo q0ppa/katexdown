@@ -1,6 +1,8 @@
 <div align="center">
 
-# Katdown - Kate Markdown Preview
+# Katdown
+
+KDE Kate Markdown preview plugin: GitHub theme with native and system color support.
 
 [![License: GPL v3](https://shields.uwuclxdy.dev/badge/License-GPLv3-blue.svg)](LICENSE)
 &nbsp;![KDE Frameworks 6](https://shields.uwuclxdy.dev/badge/KDE%20Frameworks-6-1d99f3?logo=kde&logoColor=white)
@@ -8,10 +10,7 @@
 
 </div>
 
-KDE Kate plugin for viewing GitHub-styled preview of Markdown files with live updates. Supports both GitHub's own colors and also your active editor/system theme.
-
-> [!NOTE]
-> It's vibecoded. (it works better than anything else tho)
+Kate's built-in preview uses a plain Qt renderer that looks nothing like GitHub. The other option, `kmarkdownwebview`, was abandoned in 2020 and never ported to KF6. This plugin fills that gap: it renders with the actual [github-markdown-css](https://github.com/sindresorhus/github-markdown-css), so headings, tables, blockquotes, task lists, and alerts match what you would see on github.com. Fully offline.
 
 ## Screenshots
 
@@ -33,19 +32,20 @@ The package builds from the latest commit and pulls in every dependency. Then en
 
 ### Windows
 
-Grab `katdown-<version>-windows-x86_64.zip` from the [latest release](https://github.com/uwuclxdy/katdown/releases/latest), unzip it, close Kate, and run this in an **elevated** PowerShell:
+Download `katdown-<version>-windows-x86_64.zip` from the [latest release](https://github.com/uwuclxdy/katdown/releases/latest), unzip it, close Kate, and run this in an **elevated** PowerShell:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 
-It finds Kate on its own, or takes `-KateDir "D:\Kate"`. `-WhatIf` shows what it would do, `-Uninstall` removes exactly what it installed. Then enable it: Settings, then Configure Kate, then Plugins, then check Katdown.
+It finds Kate on its own, or takes `-KateDir "D:\Kate"`. `-WhatIf` shows what it would do, `-Uninstall` removes exactly what it installed. 
+Then enable it: Settings -> Configure Kate -> Plugins -> check Katdown.
 
 The zip is about 90 MB and unpacks to roughly 220 MB, because Kate for Windows ships no Qt WebEngine, and the preview is a web view, so the runtime comes along with the plugin. Windows resolves a plugin's dependencies from the folder holding `kate.exe`, which is why those files install next to Kate rather than beside the plugin.
 
 Two limits worth knowing before you download it:
 
-- Kate has to come from the [installer](https://kate-editor.org/get-it/), not the Microsoft Store. Store installs live in a directory Windows locks down, so nothing can add a plugin to them.
+- Kate has to come from the [installer](https://kate-editor.org/get-it/), **Microsoft Store version is not supported**.
 - The build targets Kate's Qt 6.11.x. `install.ps1` checks and refuses on a mismatch, because installing anyway produces a plugin that never loads and never says why.
 
 ### Build from source
@@ -57,15 +57,13 @@ cmake -B build -S . -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX=/us
 cmake --build build
 ```
 
-Then pick install type:
-
-**System** (loads in every Kate launch):
+**System-wide** install (loads in every Kate launch):
 
 ```bash
 sudo cmake --install build
 ```
 
-**User-local** (no root, but needs a re-login to take effect). The second command adds `~/.local/lib/qt6/plugins` to Qt's plugin search path so Kate finds it:
+**User-local** install (no root, but needs a re-login to take effect):
 
 ```bash
 cmake --install build --prefix ~/.local
@@ -74,7 +72,7 @@ printf 'QT_PLUGIN_PATH=%s/.local/lib/qt6/plugins\n' "$HOME" \
     > ~/.config/environment.d/katdown.conf
 ```
 
-After installing, enable it: Settings, then Configure Kate, then Plugins, then check Katdown.
+Enable the plugin after installing: Settings -> Configure Kate -> Plugins -> check Katdown.
 
 > [!NOTE]
 > Qt WebEngine is initialized from inside Kate. On some setups you may see a console warning about `Qt::AA_ShareOpenGLContexts`. It is harmless in practice.
@@ -94,22 +92,6 @@ sudo pacman -S --needed base-devel cmake extra-cmake-modules \
 ```
 
 Building it yourself on Windows means [KDE Craft](https://community.kde.org/Craft) with MSVC 2022, since the plugin has to match the ABI of Kate's own build and Kate ships no headers. `.github/workflows/windows.yml` is the working recipe.
-
-## Why this exists
-
-Kate's built-in preview uses a plain Qt renderer that looks nothing like GitHub. The other option, `kmarkdownwebview`, was abandoned in 2020 and never ported to KF6. This plugin fills that gap: it renders with the actual [github-markdown-css](https://github.com/sindresorhus/github-markdown-css), so headings, tables, blockquotes, task lists, and alerts match what you would see on github.com. It also runs fully offline (unless you opt in).
-
-## Features
-
-- Preview opens in a real tab next to your document, not a cramped side panel
-- Live updates while you type (debounced)
-- GitHub light and dark, picked automatically from your system, or forced
-- A theme-matched mode that recolors the same GitHub layout from your active Kate editor theme, so code blocks use the exact same syntax colors as the editor
-- GitHub Flavored Markdown: tables, strikethrough, autolinks, and `- [ ]` task list checkboxes
-- GitHub alerts (`> [!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`, `[!CAUTION]`) with the matching octicons and colors
-- YAML frontmatter rendered as a GitHub-style metadata table at the top of the file
-- Toolbar button and a configurable <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd> shortcut
-- Everything is bundled — the renderer and all its assets are fully offline. Remote image loading is off by default and can be enabled in settings.
 
 ## Usage
 
@@ -143,7 +125,8 @@ Settings -> Configure Kate -> (Plugins -> enable `Katdown`) -> Katdown.
 
 Change the shortcut under Settings, then Configure Keyboard Shortcuts, search for Katdown.
 
-## How it works
+<details>
+    <summary><h2>How it works</h2></summary>
 
 The preview is a `QWebEngineView` added to Kate's tab area through `KTextEditor::MainWindow::addWidget`. The page is one self-contained HTML document with the assets inlined, so nothing loads over the network.
 
@@ -162,6 +145,8 @@ flowchart LR
 - Code highlighting uses [highlight.js](https://github.com/highlightjs/highlight.js). In GitHub style it uses the github/github-dark themes. In theme-matched style the token colors are generated at runtime from `KTextEditor::View::theme()`, so they line up with the editor.
 
 Code highlighting is close to GitHub but not byte-identical, because GitHub uses its own server-side highlighter rather than highlight.js. If needed, [starry-night](https://github.com/wooorm/starry-night) is a faithful port of GitHub's highlighter and could replace highlight.js.
+
+</details> 
 
 ## Development
 
