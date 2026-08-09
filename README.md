@@ -2,9 +2,10 @@
 
 # Katdown
 
-KDE Kate Markdown preview plugin: GitHub theme with native and system color support.
+**KDE Kate Markdown preview plugin: GitHub theme with native and system color support.**
 
 [![License: GPL v3](https://shields.uwuclxdy.dev/badge/License-GPLv3-blue.svg)](LICENSE)
+&nbsp;[![ci](https://shields.uwuclxdy.dev/github/actions/workflow/status/uwuclxdy/katdown/ci.yml?branch=mommy&label=ci)](https://github.com/uwuclxdy/katdown/actions/workflows/ci.yml)
 &nbsp;![KDE Frameworks 6](https://shields.uwuclxdy.dev/badge/KDE%20Frameworks-6-1d99f3?logo=kde&logoColor=white)
 &nbsp;![Qt 6](https://shields.uwuclxdy.dev/badge/Qt-6-41cd52?logo=qt&logoColor=white)
 
@@ -156,6 +157,14 @@ Build, then run Kate that loads the freshly built plugin without installing it:
 cmake -B build -S . -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j"$(nproc)"
 QT_PLUGIN_PATH="$PWD/build/bin" kate some-file.md
+```
+
+Tests render in a headless Chromium and keep their config out of your own Kate settings:
+
+```bash
+cmake -B build -S . -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=ON
+cmake --build build
+ctest --test-dir build --output-on-failure
 ```
 
 Source layout:
