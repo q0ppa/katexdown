@@ -66,5 +66,7 @@ jobs:
       - name: build
         run: cmake --build build
 
+      # --no-tests=error because a bare ctest exits 0 when it finds nothing to run, so a change
+      # that stopped BUILD_TESTING from registering the test would leave this step green.
       - name: test
-        run: ctest --test-dir build --output-on-failure
+        run: ctest --test-dir build --output-on-failure --no-tests=error
