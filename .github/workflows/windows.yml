@@ -190,8 +190,22 @@ jobs:
           $series = [regex]::Matches((Invoke-WebRequest -Uri $root -UseBasicParsing).Content, 'href="(release-[0-9.]+)/"') |
             ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
           if (-not $series) { throw "no release-* series found at $root" }
-          $dir = $root + $series[-1] + '/windows/'
-          Write-Host "series: $($series[-1])"
+          # The newest series dir usually appears before its Windows CI builds land on the CDN, so
+          # walk back to the newest series that has a windows/ listing. Still a canary: it tests the
+          # newest Kate the payload can be verified against.
+          $dir = $null
+          for ($i = $series.Count - 1; $i -ge 0; $i--) {
+            $candidate = $root + $series[$i] + '/windows/'
+            try {
+              $null = Invoke-WebRequest -Uri $candidate -UseBasicParsing -ErrorAction Stop
+              $dir = $candidate
+              Write-Host "series: $($series[$i])"
+              break
+            } catch {
+              Write-Host "series $($series[$i]) has no windows builds yet"
+            }
+          }
+          if (-not $dir) { throw "no release-* series with windows builds found at $root" }
           $page = Invoke-WebRequest -Uri $dir -UseBasicParsing
           $names = [regex]::Matches($page.Content, 'kate-release_[0-9.]+-(\d+)-windows-cl-msvc2022-x86_64\.exe') |
             ForEach-Object { [pscustomobject]@{ name = $_.Value; build = [int]$_.Groups[1].Value } } |
