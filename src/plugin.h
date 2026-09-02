@@ -3,14 +3,14 @@
 #include <KTextEditor/Plugin>
 
 /**
- * Entry point for the Katdown plugin. Creates a per-main-window view and
+ * Entry point for the Katexdown plugin. Creates a per-main-window view and
  * exposes one configuration page.
  */
-class KatdownPlugin : public KTextEditor::Plugin
+class KatexdownPlugin : public KTextEditor::Plugin
 {
     Q_OBJECT
 public:
-    explicit KatdownPlugin(QObject *parent, const QVariantList &args = QVariantList());
+    explicit KatexdownPlugin(QObject *parent, const QVariantList &args = QVariantList());
 
     QObject *createView(KTextEditor::MainWindow *mainWindow) override;
 

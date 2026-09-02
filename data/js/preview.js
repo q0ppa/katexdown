@@ -1,4 +1,4 @@
-// Render glue for the Katdown plugin.
+// Render glue for the Katexdown plugin.
 // Exposes a small API the C++ side drives via runJavaScript():
 //   __setMarkdown(text)      render markdown source
 //   __applyVars(obj)         set CSS custom properties on <html>
@@ -45,6 +45,22 @@
 
   md.use(taskLists);
   md.use(githubAlerts);
+
+  // Math (LaTeX): texmath.min.js defines a top-level `texmath` function when
+  // inlined as a classic script. Both assets come from the data dir (see
+  // tools/fetch-assets.py); without them `$` stays literal and nothing breaks.
+  if (window.texmath && window.katex) {
+    try {
+      window.markdownitTeXMath = window.markdownitTeXMath || window.texmath;
+      md.use(window.markdownitTeXMath, {
+        engine: window.katex,
+        delimiters: "dollars",
+        katexOptions: { throwOnError: false },
+      });
+    } catch (e) {
+      // leave math disabled rather than breaking the whole preview
+    }
+  }
 
   // GitHub alerts: > [!NOTE] / [!TIP] / [!IMPORTANT] / [!WARNING] / [!CAUTION]
   function githubAlerts(md) {

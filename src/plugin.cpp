@@ -4,25 +4,25 @@
 
 #include <KPluginFactory>
 
-K_PLUGIN_FACTORY_WITH_JSON(KatdownPluginFactory, "katdown.json", registerPlugin<KatdownPlugin>();)
+K_PLUGIN_FACTORY_WITH_JSON(KatexdownPluginFactory, "katexdown.json", registerPlugin<KatexdownPlugin>();)
 
-KatdownPlugin::KatdownPlugin(QObject *parent, const QVariantList &args)
+KatexdownPlugin::KatexdownPlugin(QObject *parent, const QVariantList &args)
     : KTextEditor::Plugin(parent)
 {
     Q_UNUSED(args);
 }
 
-QObject *KatdownPlugin::createView(KTextEditor::MainWindow *mainWindow)
+QObject *KatexdownPlugin::createView(KTextEditor::MainWindow *mainWindow)
 {
     return new PluginView(this, mainWindow);
 }
 
-int KatdownPlugin::configPages() const
+int KatexdownPlugin::configPages() const
 {
     return 1;
 }
 
-KTextEditor::ConfigPage *KatdownPlugin::configPage(int number, QWidget *parent)
+KTextEditor::ConfigPage *KatexdownPlugin::configPage(int number, QWidget *parent)
 {
     if (number != 0) {
         return nullptr;

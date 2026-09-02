@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(katdown VERSION 0.2.0 LANGUAGES CXX)
+project(katexdown VERSION 0.3.5 LANGUAGES CXX)
 
 set(QT_MIN_VERSION 6.5.0)
 set(KF_MIN_VERSION 6.0.0)
@@ -32,7 +32,7 @@ find_package(KF6 ${KF_MIN_VERSION} REQUIRED COMPONENTS
     SyntaxHighlighting
 )
 
-kcoreaddons_add_plugin(katdown
+kcoreaddons_add_plugin(katexdown
     INSTALL_NAMESPACE "kf6/ktexteditor"
     SOURCES
         src/plugin.cpp
@@ -43,13 +43,13 @@ kcoreaddons_add_plugin(katdown
         data/resources.qrc
 )
 
-target_include_directories(katdown PRIVATE src)
+target_include_directories(katexdown PRIVATE src)
 
-target_compile_definitions(katdown PRIVATE
-    KATDOWN_VERSION="${PROJECT_VERSION}"
+target_compile_definitions(katexdown PRIVATE
+    KATEXDOWN_VERSION="${PROJECT_VERSION}"
 )
 
-target_link_libraries(katdown PRIVATE
+target_link_libraries(katexdown PRIVATE
     Qt6::Core
     Qt6::Gui
     Qt6::Widgets

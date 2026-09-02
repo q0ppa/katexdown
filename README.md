@@ -1,17 +1,24 @@
 <div align="center">
 
-# Katdown
+# Katexdown
 
-**KDE Kate Markdown preview plugin: GitHub theme with native and system color support.**
+**Markdown preview for Kate in a side panel: KaTeX math, custom stylesheets,
+follows the active document. A katdown fork — GitHub theme by default, with the
+built-in stylesheet optional and replaceable.**
 
 [![License: GPL v3](https://shields.uwuclxdy.dev/badge/License-GPLv3-blue.svg)](LICENSE)
-&nbsp;[![ci](https://shields.uwuclxdy.dev/github/actions/workflow/status/uwuclxdy/katdown/ci.yml?branch=mommy&label=ci)](https://github.com/uwuclxdy/katdown/actions/workflows/ci.yml)
 &nbsp;![KDE Frameworks 6](https://shields.uwuclxdy.dev/badge/KDE%20Frameworks-6-1d99f3?logo=kde&logoColor=white)
 &nbsp;![Qt 6](https://shields.uwuclxdy.dev/badge/Qt-6-41cd52?logo=qt&logoColor=white)
 
 </div>
 
-Kate's built-in preview uses a plain Qt renderer that looks nothing like GitHub. The other option, `kmarkdownwebview`, was abandoned in 2020 and never ported to KF6. This plugin fills that gap: it renders with the actual [github-markdown-css](https://github.com/sindresorhus/github-markdown-css), so headings, tables, blockquotes, task lists, and alerts match what you would see on github.com. Fully offline.
+This is a fork of [katdown](https://github.com/uwuclxdy/katdown) that renames it
+to **Katexdown** (so it is unmistakably not vanilla katdown and can even be
+installed next to it) and adds: a preview panel that follows the active
+document, KaTeX math, custom stylesheets, a built-in-GitHub-CSS on/off switch,
+and HTML export.
+
+It renders with the actual [github-markdown-css](https://github.com/sindresorhus/github-markdown-css), so headings, tables, blockquotes, task lists, and alerts match github.com by default. Fully offline.
 
 ## Screenshots
 
@@ -23,76 +30,97 @@ Kate's built-in preview uses a plain Qt renderer that looks nothing like GitHub.
 
 ### Arch Linux (recommended)
 
-Install [`katdown-git`](https://aur.archlinux.org/packages/katdown-git) from the AUR with any helper:
+### Arch Linux (local package, no AUR entry needed)
+
+The repository ships a ready-made PKGBUILD. Build it straight from this folder
+(makepkg takes care of dependencies and installation):
 
 ```bash
-yay -S katdown-git   # or: paru -S katdown-git
+cd katexdown/aur        # the aur/ directory inside this repository
+makepkg -f -si          # installs katexdown-git system-wide
 ```
 
-The package builds from the latest commit and pulls in every dependency. Then enable it: Settings, then Configure Kate, then Plugins, then check Katdown.
+The `-f` forces a rebuild — whenever you change the source, old package
+archives in `aur/` would otherwise make makepkg silently reinstall the previous
+build instead of compiling the new code.
+
+Then enable it: Settings -> Configure Kate -> Plugins -> check **Katexdown**.
+
+> [!NOTE]
+> If you later publish this fork on GitHub, point `source=` in `aur/PKGBUILD`
+> at your repository and the same PKGBUILD can go to the AUR as-is.
+
+### Build from source (any Linux)
+
+```bash
+git clone <this-repo> katexdown
+cd katexdown
+cmake -B build -S . -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX=/usr
+cmake --build build
+sudo cmake --install build        # system-wide
+# or user-local:
+# cmake --install build --prefix ~/.local
+# printf 'QT_PLUGIN_PATH=%s/.local/lib/qt6/plugins\n' "$HOME" > ~/.config/environment.d/katexdown.conf
+```
+
+Enable the plugin after installing: Settings -> Configure Kate -> Plugins -> check Katexdown.
 
 ### Windows
 
-Download `katdown-<version>-windows-x86_64.zip` from the [latest release](https://github.com/uwuclxdy/katdown/releases/latest), unzip it, close Kate, and run this in an **elevated** PowerShell:
+Building on Windows needs [KDE Craft](https://community.kde.org/Craft) with MSVC
+2022 (the plugin must match the ABI of Kate's own Qt build). The repository
+contains the upstream Windows workflow (`.github/workflows/windows.yml`) and the
+installer script (`packaging/windows/install.ps1`); if you push this fork to
+GitHub and enable Actions, each tagged release produces a zip that installs
+with one command in an **elevated** PowerShell:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File install.ps1
+powershell -ExecutionPolicy Bypass -File install.ps1     # -KateDir "D:\Kate" if needed
 ```
 
-It finds Kate on its own, or takes `-KateDir "D:\Kate"`. `-WhatIf` shows what it would do, `-Uninstall` removes exactly what it installed. 
-Then enable it: Settings -> Configure Kate -> Plugins -> check Katdown.
+Notes for Windows:
 
-The zip is about 90 MB and unpacks to roughly 220 MB, because Kate for Windows ships no Qt WebEngine, and the preview is a web view, so the runtime comes along with the plugin. Windows resolves a plugin's dependencies from the folder holding `kate.exe`, which is why those files install next to Kate rather than beside the plugin.
+- Kate must come from the [installer](https://kate-editor.org/get-it/); the
+  Microsoft Store version is not supported.
+- Kate for Windows ships no Qt WebEngine, so the zip packs it (about 90 MB,
+  ~220 MB unpacked) and installs it next to `kate.exe`, where Windows looks
+  for plugin dependencies.
 
-Two limits worth knowing before you download it:
+### macOS
 
-- Kate has to come from the [installer](https://kate-editor.org/get-it/), **Microsoft Store version is not supported**.
-- The build targets Kate's Qt 6.11.x. `install.ps1` checks and refuses on a mismatch, because installing anyway produces a plugin that never loads and never says why.
-
-### Build from source
+Kate is [available for macOS](https://kate-editor.org/get-it/) (KDE binary
+factory / `brew install --cask kate`). The Katexdown code is plain Qt6/KF6 and
+is cross-platform in principle, but there is **no prebuilt installer for macOS
+yet** — the app bundle ships its own Qt/KF frameworks, so a plugin compiled
+against system libraries will not load. The supported path is building the
+whole KDE stack with [Craft](https://community.kde.org/Craft) (the same tooling
+as the Windows build) and letting it build this plugin against kate's
+frameworks:
 
 ```bash
-git clone https://github.com/uwuclxdy/katdown.git
-cd katdown
-cmake -B build -S . -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX=/usr
-cmake --build build
+craft --package kate
+craft --package katexdown   # after adding a Craft blueprint, or:
+craft katexdown             # local recipes via craft's local overlay
 ```
 
-**System-wide** install (loads in every Kate launch):
+If that is too much machinery, run kate in a Linux VM/container and install
+there — the plugin behaves identically.
 
-```bash
-sudo cmake --install build
-```
-
-**User-local** install (no root, but needs a re-login to take effect):
-
-```bash
-cmake --install build --prefix ~/.local
-mkdir -p ~/.config/environment.d
-printf 'QT_PLUGIN_PATH=%s/.local/lib/qt6/plugins\n' "$HOME" \
-    > ~/.config/environment.d/katdown.conf
-```
-
-Enable the plugin after installing: Settings -> Configure Kate -> Plugins -> check Katdown.
-
-> [!NOTE]
-> Qt WebEngine is initialized from inside Kate. On some setups you may see a console warning about `Qt::AA_ShareOpenGLContexts`. It is harmless in practice.
-
-## Requirements
-
-The AUR package resolves these for you. You only need them to build from source.
+### Requirements (all platforms)
 
 - Kate / KTextEditor 6 (KF6)
 - Qt 6 with WebEngine
+- Optional: Python 3 (only for `tools/fetch-assets.py`, the KaTeX downloader)
 
-On Arch:
+On Arch the dependencies are:
 
 ```bash
 sudo pacman -S --needed base-devel cmake extra-cmake-modules \
     ktexteditor qt6-webengine kcoreaddons ki18n kconfig kxmlgui ksyntaxhighlighting
 ```
 
-Building it yourself on Windows means [KDE Craft](https://community.kde.org/Craft) with MSVC 2022, since the plugin has to match the ABI of Kate's own build and Kate ships no headers. `.github/workflows/windows.yml` is the working recipe.
+> [!NOTE]
+> Qt WebEngine is initialized from inside Kate. On some setups you may see a console warning about `Qt::AA_ShareOpenGLContexts`. It is harmless in practice.
 
 ## Usage
 
@@ -105,12 +133,80 @@ kate path/to/notes.md
 Then trigger the preview in one of three ways:
 
 - press <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd>, or
-- click the Katdown button in the main toolbar (Settings, then Toolbars Shown, then Main Toolbar if it is hidden), or
-- use Tools, then Katdown.
+- click the Katexdown button in the main toolbar (Settings, then Toolbars Shown, then Main Toolbar if it is hidden), or
+- use Tools, then Katexdown.
 
-The button is greyed out unless the active tab is a Markdown document. The preview tab tracks the document and re-renders as you edit. Triggering it again focuses the existing tab instead of opening a second one.
+The preview opens in a **side panel** (a tool view on the right), so source and
+preview stay visible side by side — the preview never covers the document. Once
+the panel exists it **follows the active document**: focus any Markdown file and
+the preview switches to it, and clicking a link inside the preview opens the
+target in the editor, where it becomes the active document and the preview
+follows automatically. Non-Markdown documents leave the last content frozen in
+the panel. The panel's visibility is remembered across sessions; kate also
+registers its own "Show Preview" toggle in the View menu. The Tools menu adds an
+"Export HTML…" entry for saving the current preview as a standalone .html file.
 
-Closing the document's editor tab leaves the preview showing its last content, with `(closed)` in the tab title. Reopening the file re-attaches that same preview tab and it tracks again.
+## Loading & memory
+
+The preview is a web view with its own renderer process — that is what costs
+memory. Katexdown splits it into a cheap part (the panel shell, which always
+exists so kate's sidebar button, View menu and session restore work) and the
+heavy part (the web view), whose lifetime follows the **Preview loading**
+setting on the config page:
+
+| Mode | When the web view exists | When it is freed |
+|------|--------------------------|------------------|
+| Lazy (default) | first time the preview is opened | stays loaded after closing — toggling stays instant |
+| Lazy + free on close | first time the preview is opened | destroyed on every close; re-opening rebuilds it (a short delay) |
+| Eager | at Kate startup (plugin enabled) | only when Kate exits |
+
+With either lazy mode, Kate runs with no extra renderer process until you
+actually open a preview. Toggling through kate's own "Show Preview" menu entry
+or the sidebar button follows the same rules. Note: after a restart the panel
+opens closed in the lazy modes (that is the point — nothing loaded until asked).
+
+## Math (LaTeX) and custom stylesheets
+
+Both are optional and read from the plugin's **data directory** — no
+environment variables or flags needed on any OS. The plugin picks a
+conventional per-platform location automatically (also shown in the settings
+page, which has an *Open data folder…* button):
+
+| OS      | Data directory                                   |
+|---------|--------------------------------------------------|
+| Linux   | `~/.config/katexdown`                            |
+| Windows | `%APPDATA%\katexdown` (`AppData\Roaming\katexdown`) |
+| macOS   | `~/Library/Application Support/katexdown`        |
+
+Math needs KaTeX, downloaded once and cached until you update it manually.
+Run this once from the repository (no arguments — it writes into the same
+default directory the plugin reads, per OS):
+
+```bash
+python3 tools/fetch-assets.py
+```
+
+For development the location can be overridden with `$KATEXDOWN_DATA_DIR` or a
+directory argument (`python3 tools/fetch-assets.py SOME_DIR`); normal use never
+needs either.
+
+Once the assets exist, `$...$` and `$$...$$` render with KaTeX. Without them,
+`$` stays literal and everything else keeps working — the preview stays fully
+offline either way.
+
+Custom stylesheets are added in the settings page (Add…/Remove/order buttons);
+relative paths resolve against the same data directory. They are appended after
+the built-in GitHub stylesheet, in listed order, so a later file can override an
+earlier one — including the CSS custom properties that drive the color scheme.
+
+The **"Use the built-in GitHub stylesheet"** checkbox (on by default) switches
+the bundled github-markdown.css off entirely, so your custom stylesheets own
+the whole layout instead of layering on GitHub's look. With it off and no
+custom stylesheet configured the preview shows only the bare page chrome.
+
+**Export HTML…** (Tools menu) writes the currently rendered preview — content,
+math, and *all* included CSS (bundled or custom, KaTeX included) — into a
+standalone `.html` file you can share or print.
 
 ## Configuration
 
@@ -123,26 +219,32 @@ Settings -> Configure Kate -> (Plugins -> enable `Katdown`) -> Katdown.
 | Style | GitHub / Match editor or system theme | GitHub uses GitHub's palette. Match recolors the same layout from your active editor theme. |
 | GitHub variant | Auto / Light / Dark | Which GitHub palette to use. Auto follows whether your system is light or dark. Only applies in GitHub style. |
 | Load media previews from remote URLs | On / Off (default) | When on, images referencing `http(s)` URLs are fetched and rendered. When off (the default), the preview loads no remote resources and works fully offline. Images with paths relative to the document always load regardless of this setting. |
+| Custom stylesheets | list | Files appended after the built-in style, in listed order. Relative paths resolve against the Katdown data dir. |
 
 Change the shortcut under Settings, then Configure Keyboard Shortcuts, search for Katdown.
 
 <details>
     <summary><h2>How it works</h2></summary>
 
-The preview is a `QWebEngineView` added to Kate's tab area through `KTextEditor::MainWindow::addWidget`. The page is one self-contained HTML document with the assets inlined, so nothing loads over the network.
+The preview is a `QWebEngineView` living in a `KTextEditor::MainWindow::createToolView()`
+panel (kate's "tool view" side area), re-targeted at the active Markdown
+document on every `viewChanged`. The page is one self-contained HTML document
+with the bundled assets inlined, plus the optional data-dir extras (KaTeX and
+user CSS) read at page build time — nothing loads over the network.
 
 ```mermaid
 flowchart LR
-    A["Markdown document"] -->|"textChanged (debounced)"| B["PreviewWidget"]
+    A["Active Markdown document"] -->|"viewChanged + textChanged (debounced)"| B["PreviewWidget"]
     B -->|"setHtml once"| C["QWebEngineView"]
     B -->|"runJavaScript()"| D["preview.js"]
-    D --> E["markdown-it<br/>tasks · alerts · frontmatter"]
+    D --> E["markdown-it<br/>texmath · tasks · alerts · frontmatter"]
     D --> F["highlight.js"]
+    H["data dir: KaTeX + custom CSS"] -->|"read at page build"| C
     G["Editor theme / GitHub palette"] -->|"CSS variables"| C
 ```
 
 - Layout and typography come from `github-markdown-css`. The built-in color values are stripped out so the plugin can drive them from CSS custom properties.
-- Markdown is parsed by [markdown-it](https://github.com/markdown-it/markdown-it). Small bundled plugins add task-list checkboxes and GitHub alerts, and leading YAML frontmatter is parsed with [js-yaml](https://github.com/nodeca/js-yaml) into a metadata table.
+- Markdown is parsed by [markdown-it](https://github.com/markdown-it/markdown-it). Small bundled plugins add task-list checkboxes and GitHub alerts, leading YAML frontmatter is parsed with [js-yaml](https://github.com/nodeca/js-yaml) into a metadata table, and [markdown-it-texmath](https://github.com/goessner/markdown-it-texmath) + [KaTeX](https://katex.org/) render math when downloaded.
 - Code highlighting uses [highlight.js](https://github.com/highlightjs/highlight.js). In GitHub style it uses the github/github-dark themes. In theme-matched style the token colors are generated at runtime from `KTextEditor::View::theme()`, so they line up with the editor.
 
 Code highlighting is close to GitHub but not byte-identical, because GitHub uses its own server-side highlighter rather than highlight.js. If needed, [starry-night](https://github.com/wooorm/starry-night) is a faithful port of GitHub's highlighter and could replace highlight.js.
@@ -156,7 +258,7 @@ Build, then run Kate that loads the freshly built plugin without installing it:
 ```bash
 cmake -B build -S . -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j"$(nproc)"
-QT_PLUGIN_PATH="$PWD/build/bin" kate some-file.md
+QT_PLUGIN_PATH="$PWD/build/bin" kate some-file.md   # optional: KATEXDOWN_DATA_DIR=$PWD/runtime to keep assets in the repo
 ```
 
 Tests render in a headless Chromium and keep their config out of your own Kate settings:
@@ -170,16 +272,20 @@ ctest --test-dir build --output-on-failure
 Source layout:
 
 - `src/plugin.*` plugin entry point and config page registration
-- `src/pluginview.*` per-window action, toolbar/menu wiring, opening the tab
+- `src/pluginview.*` per-window action and the follow-mode tool-view panel
 - `src/previewwidget.*` the web view, rendering, and theme derivation
 - `src/configpage.*` the settings page
 - `src/settings.*` persisted settings
+- `src/katexdownpaths.h` per-platform data-dir resolution (env override only for tests/dev)
+- `tools/fetch-assets.py` one-shot downloader for the optional KaTeX assets
 - `data/` bundled HTML, CSS, JS, and the qrc
 
 ## Credits
 
 - [github-markdown-css](https://github.com/sindresorhus/github-markdown-css) by Sindre Sorhus
 - [markdown-it](https://github.com/markdown-it/markdown-it)
+- [markdown-it-texmath](https://github.com/goessner/markdown-it-texmath) (downloaded on demand)
+- [KaTeX](https://katex.org/) (downloaded on demand)
 - [highlight.js](https://github.com/highlightjs/highlight.js)
 - [js-yaml](https://github.com/nodeca/js-yaml)
 

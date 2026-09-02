@@ -5,7 +5,7 @@
 
 static QString groupName()
 {
-    return QStringLiteral("Katdown");
+    return QStringLiteral("Katexdown");
 }
 
 Settings::Settings(QObject *parent)
@@ -35,6 +35,9 @@ void Settings::load()
         m_ghVariant = Auto;
     }
     m_loadRemoteMedia = cfg.readEntry("LoadRemoteMedia", false);
+    m_useGithubCss = cfg.readEntry("GithubCss", true);
+    m_loadingMode = static_cast<Settings::LoadingMode>(cfg.readEntry("LoadingMode", int(LazyKeep)));
+    m_customCssFiles = cfg.readEntry("CustomCssFiles", QStringList());
 }
 
 void Settings::save() const
@@ -44,6 +47,9 @@ void Settings::save() const
     const char *variant = m_ghVariant == Light ? "light" : m_ghVariant == Dark ? "dark" : "auto";
     cfg.writeEntry("GithubVariant", QString::fromLatin1(variant));
     cfg.writeEntry("LoadRemoteMedia", m_loadRemoteMedia);
+    cfg.writeEntry("GithubCss", m_useGithubCss);
+    cfg.writeEntry("LoadingMode", int(m_loadingMode));
+    cfg.writeEntry("CustomCssFiles", m_customCssFiles);
     cfg.sync();
 }
 
@@ -73,6 +79,36 @@ void Settings::setLoadRemoteMedia(bool enabled)
         return;
     }
     m_loadRemoteMedia = enabled;
+    save();
+    Q_EMIT changed();
+}
+
+void Settings::setUseGithubCss(bool enabled)
+{
+    if (m_useGithubCss == enabled) {
+        return;
+    }
+    m_useGithubCss = enabled;
+    save();
+    Q_EMIT changed();
+}
+
+void Settings::setLoadingMode(LoadingMode mode)
+{
+    if (m_loadingMode == mode) {
+        return;
+    }
+    m_loadingMode = mode;
+    save();
+    Q_EMIT changed();
+}
+
+void Settings::setCustomCssFiles(const QStringList &files)
+{
+    if (m_customCssFiles == files) {
+        return;
+    }
+    m_customCssFiles = files;
     save();
     Q_EMIT changed();
 }

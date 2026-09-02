@@ -1,1 +1,18 @@
-/build/
+# Build output
+/build*/
+build/
+
+# Downloaded math assets (tools/fetch-assets.py) — re-fetch, never commit
+/runtime/
+
+# Editor/OS noise
+*.swp
+*~
+.DS_Store
+compile_commands.json
+
+# makepkg build debris
+/aur/src/
+/aur/pkg/
+/aur/*.pkg.tar.*
+/aur/katexdown/

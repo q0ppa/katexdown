@@ -1,19 +1,40 @@
-# Maintainer: uwuclxdy <uwuclxdy@pm.me>
+# Maintainer: katexdown contributors
+#
+# Katexdown — katdown fork with KaTeX math, custom CSS, follow-mode panel and
+# HTML export. This PKGBUILD builds straight from the parent directory of this
+# file (i.e. the katexdown repository), no AUR entry needed:
+#
+#   cd katexdown/aur
+#   makepkg -si
+#
+# If you publish the fork on GitHub later, point `url` at your repository and
+# this PKGBUILD can be submitted to the AUR as-is (name: katexdown-git).
 
-pkgname=katdown-git
-_pkgbase=katdown
-pkgver=r3.f4f7b4c
-pkgrel=3
-pkgdesc="GitHub-styled live Markdown preview for Kate (KTextEditor/KF6)"
+pkgname=katexdown-git
+_pkgbase=katexdown
+pkgver=0.2.0.r1.g6ec7085
+pkgrel=1
+pkgdesc="Markdown preview side panel for Kate with KaTeX math and custom CSS (katdown fork)"
 arch=('x86_64')
 url="https://github.com/uwuclxdy/katdown"
 license=('GPL-3.0-or-later')
 depends=('ktexteditor' 'syntax-highlighting' 'kxmlgui' 'kconfig' 'ki18n' 'kcoreaddons' 'qt6-base' 'qt6-webengine')
 makedepends=('git' 'cmake' 'extra-cmake-modules')
-provides=('katdown')
-conflicts=('katdown')
-source=("git+$url.git")
+provides=('katexdown')
+conflicts=('katexdown')
+# Build from the repository this PKGBUILD ships in (the aur/ parent dir).
+# git+file clones only committed state; prepare() below overlays the actual
+# working tree afterwards, so uncommitted changes are built too.
+source=("$_pkgbase::git+file://${PWD%/*}")
 sha256sums=('SKIP')
+
+prepare() {
+  # Make the build match what is in the repository right now (uncommitted
+  # changes included). Skip bulky/dev dirs.
+  cd "$srcdir/$_pkgbase"
+  tar --exclude='./build*' --exclude='./runtime' --exclude='./aur' \
+      -C "$startdir/.." -cf - . | tar -xf -
+}
 
 pkgver() {
   cd "$srcdir/$_pkgbase"
@@ -36,3 +57,5 @@ package() {
   cd "$srcdir/$_pkgbase"
   DESTDIR="$pkgdir" cmake --install build
 }
+
+# To publish on the AUR later, regenerate with: makepkg --printsrcinfo > .SRCINFO

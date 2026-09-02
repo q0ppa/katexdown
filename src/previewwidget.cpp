@@ -1,9 +1,11 @@
 #include "previewwidget.h"
+#include "katexdownpaths.h"
 #include "settings.h"
 
 #include <QAction>
 #include <QApplication>
 #include <QColor>
+#include <QDebug>
 #include <QDesktopServices>
 #include <QDir>
 #include <QEvent>
@@ -326,6 +328,9 @@ PreviewWidget::PreviewWidget(KTextEditor::MainWindow *mainWindow, KTextEditor::V
         installInputFilter();
         applyTheme();
         render();
+        if (!m_pendingExportPath.isEmpty()) {
+            performExport(m_pendingExportPath);
+        }
     });
 
     connect(Settings::self(), &Settings::changed, this, &PreviewWidget::applyTheme);
@@ -351,6 +356,16 @@ void PreviewWidget::attachDocument(KTextEditor::Document *doc, KTextEditor::View
         connect(doc, &KTextEditor::Document::textChanged, this, &PreviewWidget::scheduleRender);
         connect(doc, &KTextEditor::Document::documentUrlChanged, this, &PreviewWidget::onDocumentUrlChanged);
         connect(doc, &KTextEditor::Document::aboutToClose, this, &PreviewWidget::snapshotSource);
+        // Follow mode: the preview stays open when the editor tab of its
+        // document closes; freeze on the snapshot and stop touching it.
+        connect(doc, &QObject::destroyed, this, [this, doc]() {
+            if (m_doc.isNull() || m_doc == doc) {
+                m_debounce->stop();
+                m_view = nullptr;
+                m_doc = nullptr;
+                updateTitle();
+            }
+        });
     }
     loadPage(); // refreshes m_url, which updateTitle() reads
     updateTitle();
@@ -397,17 +412,44 @@ PreviewWidget::~PreviewWidget()
     m_guard = nullptr;
 }
 
-QString PreviewWidget::buildHtml()
+// Read one optional asset from the data dir. Returns empty when the file is
+// missing, so a cache that was never populated degrades gracefully.
+static QString optionalAsset(const QString &name)
 {
-    const QString base = QStringLiteral(":/katdown/");
+    return katexdownpaths::readIfPresent(katexdownpaths::resolveAssetPath(name));
+}
+
+// Concatenate the user's custom stylesheets (settings), resolving relative
+// paths against the data dir. Missing files are skipped silently.
+static QString userCss()
+{
+    QString css;
+    const QStringList files = Settings::self()->customCssFiles();
+    for (const QString &file : files) {
+        css += katexdownpaths::readIfPresent(katexdownpaths::resolveAssetPath(file));
+    }
+    return css;
+}
+
+QString PreviewWidget::buildHtml() const
+{
+    const QString base = QStringLiteral(":/katexdown/");
     QString html = readAsset(base + QStringLiteral("preview.html"));
-    html.replace(QLatin1String("/*__GHMD_CSS__*/"), readAsset(base + QStringLiteral("css/github-markdown.css")));
+    // The bundled GitHub stylesheet is on by default but can be disabled so a
+    // custom stylesheet owns the whole layout. Empty <style> is harmless.
+    const QString githubCss = Settings::self()->useGithubCss() ? readAsset(base + QStringLiteral("css/github-markdown.css")) : QString();
+    html.replace(QLatin1String("/*__GHMD_CSS__*/"), githubCss);
     html.replace(QLatin1String("/*__BASE_CSS__*/"), readAsset(base + QStringLiteral("css/base.css")));
     html.replace(QLatin1String("/*__HLJS_LIGHT__*/"), readAsset(base + QStringLiteral("css/hljs-github.min.css")));
     html.replace(QLatin1String("/*__HLJS_DARK__*/"), readAsset(base + QStringLiteral("css/hljs-github-dark.min.css")));
+    // Optional extras from the data dir; empty when not downloaded yet.
+    html.replace(QLatin1String("/*__KATEX_CSS__*/"), optionalAsset(QStringLiteral("katex-standalone.min.css")));
+    html.replace(QLatin1String("/*__USER_CSS__*/"), userCss());
     html.replace(QLatin1String("/*__MARKDOWN_IT__*/"), shieldScript(readAsset(base + QStringLiteral("js/markdown-it.min.js"))));
     html.replace(QLatin1String("/*__HLJS_JS__*/"), shieldScript(readAsset(base + QStringLiteral("js/highlight.min.js"))));
     html.replace(QLatin1String("/*__JS_YAML__*/"), shieldScript(readAsset(base + QStringLiteral("js/js-yaml.min.js"))));
+    html.replace(QLatin1String("/*__KATEX_JS__*/"), shieldScript(optionalAsset(QStringLiteral("katex.min.js"))));
+    html.replace(QLatin1String("/*__TEXMATH_JS__*/"), shieldScript(optionalAsset(QStringLiteral("texmath.min.js"))));
     html.replace(QLatin1String("/*__PREVIEW_JS__*/"), shieldScript(readAsset(base + QStringLiteral("js/preview.js"))));
     return html;
 }
@@ -417,11 +459,14 @@ QUrl PreviewWidget::baseUrl() const
     if (m_url.isLocalFile()) {
         return m_url.adjusted(QUrl::RemoveFilename);
     }
-    return QUrl(QStringLiteral("qrc:/katdown/"));
+    return QUrl(QStringLiteral("qrc:/katexdown/"));
 }
 
 void PreviewWidget::loadPage()
 {
+    if (qEnvironmentVariableIsSet("KATEXDOWN_DEBUG")) {
+        qDebug() << "[katexdown] loadPage (full setHtml rebuild), doc url:" << (m_doc ? m_doc->url().toString() : QStringLiteral("(none)"));
+    }
     if (m_doc) {
         m_url = m_doc->url();
     }
@@ -442,6 +487,46 @@ void PreviewWidget::onDocumentUrlChanged()
     }
     loadPage();
     updateTitle();
+}
+
+// Serialize the live, fully rendered page (all styles inline, KaTeX already
+// expanded) into a standalone .html file. When the page is not loaded yet
+// (e.g. the export action triggered the very first lazy creation) the export
+// is deferred until the page finishes loading.
+bool PreviewWidget::exportToFile(const QString &path)
+{
+    if (path.isEmpty()) {
+        return false;
+    }
+    if (!m_loaded) {
+        m_pendingExportPath = path;
+        return true;
+    }
+    performExport(path);
+    return true;
+}
+
+void PreviewWidget::performExport(const QString &path)
+{
+    m_pendingExportPath.clear();
+    // Make sure the very latest text is on screen before grabbing the DOM.
+    if (m_doc && !m_bufferStale) {
+        m_text = m_doc->text();
+    }
+    runJs(QStringLiteral("window.__setMarkdown(%1);").arg(jsLiteral(m_text)));
+    // Re-render is synchronous in the page; give the compositor a moment and
+    // then serialize the current DOM, styles and all.
+    QTimer::singleShot(300, this, [this, path]() {
+        m_web->page()->runJavaScript(QStringLiteral("document.documentElement.outerHTML"), [this, path](const QVariant &html) {
+            QFile f(path);
+            if (!f.open(QIODevice::WriteOnly)) {
+                qWarning("katexdown: cannot write export file %s", qPrintable(path));
+                return;
+            }
+            f.write(html.toString().toUtf8());
+            Q_EMIT exportFinished(path);
+        });
+    });
 }
 
 void PreviewWidget::openLink(const QUrl &url)

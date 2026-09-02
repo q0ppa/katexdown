@@ -1,6 +1,11 @@
 # Third-party notices
 
-This plugin bundles the following libraries in `data/`. Their licenses are reproduced below.
+This plugin bundles the following libraries in `data/`. Their licenses are
+reproduced below. (The optional math support additionally downloads
+[KaTeX](https://katex.org/) and
+[markdown-it-texmath](https://github.com/goessner/markdown-it-texmath), both
+MIT-licensed, into the data dir via `tools/fetch-assets.py`; they are not
+shipped with the plugin.)
 
 ## markdown-it
 

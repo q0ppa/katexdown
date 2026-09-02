@@ -51,6 +51,15 @@ public:
     void attachDocument(KTextEditor::Document *doc, KTextEditor::View *view);
     void detachDocument();
 
+    // Write the currently rendered preview (with all included CSS) to path as
+    // a standalone HTML file. Asynchronous; deferred until the page has
+    // finished loading if it has not yet.
+    bool exportToFile(const QString &path);
+
+Q_SIGNALS:
+    // Emitted once the standalone HTML file has been written to path.
+    void exportFinished(const QString &path);
+
 public Q_SLOTS:
     void applyTheme();
 
@@ -66,12 +75,13 @@ private Q_SLOTS:
 private:
     void updateTitle();
     void render();
+    void performExport(const QString &path);
     void runJs(const QString &code);
     void loadPage();
     void openLink(const QUrl &url);
     void applyMediaPolicy();
     QUrl baseUrl() const;
-    static QString buildHtml();
+    QString buildHtml() const;
 
     // Forward input the preview doesn't use back to Kate: QWebEngineView's render
     // widget swallows keys/mouse buttons before Kate's shortcut machinery sees them.
@@ -90,6 +100,7 @@ private:
     QPointer<QWidget> m_inputTarget;
     QUrl m_url;
     QString m_text;
+    QString m_pendingExportPath;
     bool m_loaded = false;
     bool m_remoteApplied = false;
     // Set once the document announced its close: its buffer gets emptied straight
