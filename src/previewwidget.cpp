@@ -21,6 +21,7 @@
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
+#include <QWebEngineHistory>
 #include <QWebEnginePage>
 #include <QWebEngineProfile>
 #include <QWebEngineSettings>
@@ -54,6 +55,135 @@ QString readAsset(const QString &path)
 QString shieldScript(QString js)
 {
     return js.replace(QLatin1String("</script"), QLatin1String("<\\/script"), Qt::CaseInsensitive);
+}
+
+// ---------------------------------------------------------------------------
+// Optional engine selection: the page inlines each engine's JS/CSS, so a page
+// only carries the engines its document text can actually use:
+//   kEngineKatex   KaTeX math ($...$ / $$...$$ / \(...\) / \[...\])
+//   kEngineHljs    syntax highlighting for fenced code blocks
+//   kEngineYaml    YAML front matter (a document starting with a "---" line)
+// enginesForText() is a cheap, allocation-free, line-oriented scan. It only
+// runs for pages that are missing an engine (a fully equipped page never
+// re-scans), and a false negative is self-healing: render() rebuilds the page
+// the moment the text starts needing an engine the page lacks. Lines inside
+// fences are skipped, so dollar amounts and $-using code do not pull KaTeX
+// in. Indented (non-fenced) code blocks are intentionally not detected:
+// markdown-it still renders them without highlight.js — only the colors are
+// missing until the next full load.
+// ---------------------------------------------------------------------------
+constexpr int kEngineNone = 0;
+constexpr int kEngineKatex = 1 << 0;
+constexpr int kEngineHljs = 1 << 1;
+constexpr int kEngineYaml = 1 << 2;
+constexpr int kEngineAll = kEngineKatex | kEngineHljs | kEngineYaml;
+
+// Does the line [from, to) of text look like it contains LaTeX?
+static bool lineLooksLikeMath(const QString &text, int from, int to)
+{
+    for (int p = from; p + 1 < to; ++p) {
+        const QChar ch = text.at(p);
+        if (ch == QLatin1Char('\\')) {
+            // \( \) \[ \] are unambiguous math delimiters.
+            const QChar n = text.at(p + 1);
+            if (n == QLatin1Char('(') || n == QLatin1Char(')') || n == QLatin1Char('[') || n == QLatin1Char(']')) {
+                return true;
+            }
+            ++p; // the escaped character cannot open another marker
+            continue;
+        }
+        if (ch != QLatin1Char('$') || (p > from && text.at(p - 1) == QLatin1Char('\\'))) {
+            continue; // escaped dollar signs are literal
+        }
+        if (p + 1 < to && text.at(p + 1) == QLatin1Char('$')) {
+            return true; // $$ display math (may span lines)
+        }
+        // Inline $...$: the opener must not sit against a space or a digit
+        // (that would be currency, "$5"), and the pair must enclose at least
+        // one LaTeX-ish character. A closing dollar must exist on the same
+        // line — texmath's inline math does not span lines either.
+        const QChar next = text.at(p + 1);
+        if (next.isSpace() || next.isDigit()) {
+            continue;
+        }
+        bool latexish = false;
+        for (int q = p + 1; q < to; ++q) {
+            const QChar c = text.at(q);
+            if (c == QLatin1Char('$')) {
+                return latexish; // closing dollar: math only with content
+            }
+            if (c.isLetter() || c == QLatin1Char('\\') || c == QLatin1Char('^') || c == QLatin1Char('_') || c == QLatin1Char('{')
+                || c == QLatin1Char('}')) {
+                latexish = true;
+            }
+        }
+        // No closing dollar on this line: nothing further on it can pair up.
+        return false;
+    }
+    return false;
+}
+
+static int enginesForText(const QString &text)
+{
+    int engines = kEngineNone;
+    const int len = text.size();
+    int lineStart = 0;
+    int lineNo = 0;
+    QChar fence; // fence marker we are inside ('`' or '~'), null when outside
+
+    while (lineStart <= len) {
+        const int nl = text.indexOf(QLatin1Char('\n'), lineStart);
+        const int lineEnd = nl < 0 ? len : nl;
+
+        // Leading whitespace: fences may be indented up to three spaces.
+        int c = lineStart;
+        while (c < lineEnd && (text.at(c) == QLatin1Char(' ') || text.at(c) == QLatin1Char('\t'))) {
+            ++c;
+        }
+        const bool indented = (c - lineStart) >= 4;
+        const int first = c; // first non-blank column (lineEnd for blank lines)
+        const bool fenceLine = !indented && first + 2 < lineEnd && text.at(first) == QLatin1Char('`')
+            && text.at(first + 1) == QLatin1Char('`') && text.at(first + 2) == QLatin1Char('`');
+        const bool tildeLine = !indented && first + 2 < lineEnd && text.at(first) == QLatin1Char('~')
+            && text.at(first + 1) == QLatin1Char('~') && text.at(first + 2) == QLatin1Char('~');
+
+        if (fence.isNull()) {
+            if (lineNo == 0 && first == lineStart && lineEnd - lineStart >= 3
+                && text.mid(lineStart, 3) == QLatin1String("---")) {
+                // Front matter: the very first line is exactly "---" (possibly
+                // with trailing spaces) — same rule as preview.js's FRONT_MATTER.
+                bool onlySpaces = true;
+                for (int k = lineStart + 3; k < lineEnd; ++k) {
+                    if (!text.at(k).isSpace()) {
+                        onlySpaces = false;
+                        break;
+                    }
+                }
+                if (onlySpaces) {
+                    engines |= kEngineYaml;
+                }
+            }
+            if (fenceLine) {
+                engines |= kEngineHljs;
+                fence = QLatin1Char('`');
+            } else if (tildeLine) {
+                engines |= kEngineHljs;
+                fence = QLatin1Char('~');
+            } else if (lineLooksLikeMath(text, lineStart, lineEnd)) {
+                engines |= kEngineKatex;
+            }
+        } else if ((fence == QLatin1Char('`') && fenceLine) || (fence == QLatin1Char('~') && tildeLine)) {
+            fence = QChar(); // closing fence: the marker must match
+        }
+        // Everything inside a fence is skipped by the math scan.
+
+        if (engines == kEngineAll) {
+            break;
+        }
+        lineStart = nl < 0 ? len + 1 : nl + 1;
+        ++lineNo;
+    }
+    return engines;
 }
 
 // Encode a string as a JavaScript string literal (incl. surrounding quotes).
@@ -308,8 +438,19 @@ PreviewWidget::PreviewWidget(KTextEditor::MainWindow *mainWindow, KTextEditor::V
         openLink(url);
     };
     m_web->setPage(page);
-    m_web->settings()->setAttribute(QWebEngineSettings::FocusOnNavigationEnabled, false);
-    m_web->settings()->setAttribute(QWebEngineSettings::LocalContentCanAccessFileUrls, true);
+    // A Markdown reader does not use Chromium's interactive feature surface;
+    // disabling it trims the renderer's GPU/compositor-side memory and raster
+    // work. Images, scrolling, links and same-page anchors stay enabled.
+    auto *webSettings = m_web->settings();
+    webSettings->setAttribute(QWebEngineSettings::FocusOnNavigationEnabled, false);
+    webSettings->setAttribute(QWebEngineSettings::LocalContentCanAccessFileUrls, true);
+    webSettings->setAttribute(QWebEngineSettings::WebGLEnabled, false);
+    webSettings->setAttribute(QWebEngineSettings::Accelerated2dCanvasEnabled, false);
+    webSettings->setAttribute(QWebEngineSettings::PdfViewerEnabled, false);
+    webSettings->setAttribute(QWebEngineSettings::JavascriptCanOpenWindows, false);
+    webSettings->setAttribute(QWebEngineSettings::FullScreenSupportEnabled, false);
+    webSettings->setAttribute(QWebEngineSettings::LocalStorageEnabled, false);
+    webSettings->setAttribute(QWebEngineSettings::PlaybackRequiresUserGesture, true);
     // Watch the view for the lazily-created render widget so we can attach to it (below).
     m_web->installEventFilter(this);
     installInputFilter();
@@ -320,23 +461,61 @@ PreviewWidget::PreviewWidget(KTextEditor::MainWindow *mainWindow, KTextEditor::V
     m_debounce->setInterval(150);
     connect(m_debounce, &QTimer::timeout, this, &PreviewWidget::render);
 
+    // A discarded page has no renderer: until Qt reloads it (on the next
+    // panel open) it is not "loaded", so renders/theme pushes skip it and the
+    // load pipeline re-applies everything once the page is back.
+    connect(page, &QWebEnginePage::lifecycleStateChanged, this, [this](QWebEnginePage::LifecycleState state) {
+        if (state == QWebEnginePage::LifecycleState::Discarded) {
+            m_loaded = false;
+        }
+        if (qEnvironmentVariableIsSet("KATEXDOWN_DEBUG")) {
+            qDebug() << "[katexdown] page lifecycle state" << int(state);
+        }
+    });
+
+    // Closed-panel idle policy (panelClosed/panelOpened/idleTick): freezing on
+    // close is instant; only the release of a long-closed preview waits for
+    // m_idleDiscardMs. KATEXDOWN_IDLE_DISCARD_MS is a test hook (like
+    // KATEXDOWN_DEBUG) to shorten that delay.
+    const int overrideMs = qEnvironmentVariableIntValue("KATEXDOWN_IDLE_DISCARD_MS");
+    if (overrideMs > 0) {
+        m_idleDiscardMs = overrideMs;
+    }
+    m_idleTimer = new QTimer(this);
+    m_idleTimer->setInterval(1000);
+    connect(m_idleTimer, &QTimer::timeout, this, &PreviewWidget::idleTick);
+
     connect(m_web, &QWebEngineView::loadFinished, this, [this](bool ok) {
         if (!ok) {
             return;
         }
         m_loaded = true;
+        // Each setHtml() is a fresh navigation; dropping the back/forward list
+        // keeps previously rendered documents from lingering in the page cache
+        // after a document switch (the preview never navigates back/forward).
+        m_web->history()->clear();
         installInputFilter();
         applyTheme();
+        // Apply the image mode before the first render so the page never
+        // renders once in the default mode and again in the configured one
+        // (__setImageMode re-renders only when the mode actually changes).
+        applyImageMode();
         render();
         applyOutlineSettings();
         if (!m_pendingExportPath.isEmpty()) {
             performExport(m_pendingExportPath);
+        }
+        // The panel may have closed while this page was still loading (Qt only
+        // freezes loaded, hidden pages): apply the closed-panel policy now.
+        if (m_panelClosed) {
+            m_web->page()->setLifecycleState(QWebEnginePage::LifecycleState::Frozen);
         }
     });
 
     connect(Settings::self(), &Settings::changed, this, &PreviewWidget::applyTheme);
     connect(Settings::self(), &Settings::changed, this, &PreviewWidget::applyMediaPolicy);
     connect(Settings::self(), &Settings::changed, this, &PreviewWidget::applyOutlineSettings);
+    connect(Settings::self(), &Settings::changed, this, &PreviewWidget::applyImageMode);
 
     setWindowIcon(QIcon::fromTheme(QStringLiteral("text-markdown")));
     applyMediaPolicy();
@@ -433,7 +612,7 @@ static QString userCss()
     return css;
 }
 
-QString PreviewWidget::buildHtml() const
+QString PreviewWidget::buildHtml(int engines) const
 {
     const QString base = QStringLiteral(":/katexdown/");
     QString html = readAsset(base + QStringLiteral("preview.html"));
@@ -442,17 +621,30 @@ QString PreviewWidget::buildHtml() const
     const QString githubCss = Settings::self()->useGithubCss() ? readAsset(base + QStringLiteral("css/github-markdown.css")) : QString();
     html.replace(QLatin1String("/*__GHMD_CSS__*/"), githubCss);
     html.replace(QLatin1String("/*__BASE_CSS__*/"), readAsset(base + QStringLiteral("css/base.css")));
+    // The syntax-highlight stylesheets are small and only match .hljs elements
+    // (which exist only after highlight.js ran); keeping them on every page
+    // means a theme switch can never leave a gap.
     html.replace(QLatin1String("/*__HLJS_LIGHT__*/"), readAsset(base + QStringLiteral("css/hljs-github.min.css")));
     html.replace(QLatin1String("/*__HLJS_DARK__*/"), readAsset(base + QStringLiteral("css/hljs-github-dark.min.css")));
-    // Optional extras from the data dir; empty when not downloaded yet.
-    html.replace(QLatin1String("/*__KATEX_CSS__*/"), optionalAsset(QStringLiteral("katex-standalone.min.css")));
     html.replace(QLatin1String("/*__USER_CSS__*/"), userCss());
+    // markdown-it is the renderer core: always present. preview.js and
+    // preview.html treat an engine slot left empty as "feature off", exactly
+    // like a page whose data-dir assets are missing.
     html.replace(QLatin1String("/*__MARKDOWN_IT__*/"), shieldScript(readAsset(base + QStringLiteral("js/markdown-it.min.js"))));
-    html.replace(QLatin1String("/*__HLJS_JS__*/"), shieldScript(readAsset(base + QStringLiteral("js/highlight.min.js"))));
-    html.replace(QLatin1String("/*__JS_YAML__*/"), shieldScript(readAsset(base + QStringLiteral("js/js-yaml.min.js"))));
-    html.replace(QLatin1String("/*__KATEX_JS__*/"), shieldScript(optionalAsset(QStringLiteral("katex.min.js"))));
-    html.replace(QLatin1String("/*__TEXMATH_JS__*/"), shieldScript(optionalAsset(QStringLiteral("texmath.min.js"))));
     html.replace(QLatin1String("/*__PREVIEW_JS__*/"), shieldScript(readAsset(base + QStringLiteral("js/preview.js"))));
+    // Optional engines, gated by the bits loadPage() chose for this text.
+    // KaTeX is by far the heaviest (hundreds of KB of JS/CSS plus font data),
+    // so its stylesheet is gated together with its scripts.
+    const QString katexCss = (engines & kEngineKatex) ? optionalAsset(QStringLiteral("katex-standalone.min.css")) : QString();
+    const QString katexJs = (engines & kEngineKatex) ? optionalAsset(QStringLiteral("katex.min.js")) : QString();
+    const QString texmathJs = (engines & kEngineKatex) ? optionalAsset(QStringLiteral("texmath.min.js")) : QString();
+    const QString hljsJs = (engines & kEngineHljs) ? readAsset(base + QStringLiteral("js/highlight.min.js")) : QString();
+    const QString yamlJs = (engines & kEngineYaml) ? readAsset(base + QStringLiteral("js/js-yaml.min.js")) : QString();
+    html.replace(QLatin1String("/*__KATEX_CSS__*/"), katexCss);
+    html.replace(QLatin1String("/*__KATEX_JS__*/"), shieldScript(katexJs));
+    html.replace(QLatin1String("/*__TEXMATH_JS__*/"), shieldScript(texmathJs));
+    html.replace(QLatin1String("/*__HLJS_JS__*/"), shieldScript(hljsJs));
+    html.replace(QLatin1String("/*__JS_YAML__*/"), shieldScript(yamlJs));
     return html;
 }
 
@@ -466,6 +658,12 @@ QUrl PreviewWidget::baseUrl() const
 
 void PreviewWidget::loadPage()
 {
+    // Engine selection below must reflect the live text: a document switch can
+    // arrive before the page ever rendered (m_text would otherwise hold the
+    // previous document's content).
+    if (m_doc && !m_bufferStale) {
+        m_text = m_doc->text();
+    }
     if (qEnvironmentVariableIsSet("KATEXDOWN_DEBUG")) {
         qDebug() << "[katexdown] loadPage (full setHtml rebuild), doc url:" << (m_doc ? m_doc->url().toString() : QStringLiteral("(none)"));
     }
@@ -475,7 +673,13 @@ void PreviewWidget::loadPage()
     const QString root = m_url.isLocalFile() ? QFileInfo(m_url.toLocalFile()).absolutePath() : QString();
     static_cast<LocalFileGuard *>(m_guard)->setRoot(root);
     m_loaded = false;
-    m_web->setHtml(buildHtml(), baseUrl());
+    // Inline only the engines this text can use (see enginesForText). If the
+    // text later grows into an engine the page lacks, render() rebuilds it.
+    m_pageEngines = enginesForText(m_text);
+    if (qEnvironmentVariableIsSet("KATEXDOWN_DEBUG")) {
+        qDebug() << "[katexdown]   built with engines:" << m_pageEngines;
+    }
+    m_web->setHtml(buildHtml(m_pageEngines), baseUrl());
 }
 
 // Closing a document clears its url before anything announces the close, so an
@@ -501,7 +705,25 @@ bool PreviewWidget::exportToFile(const QString &path)
         return false;
     }
     if (!m_loaded) {
+        // A discarded page restores (reloads) on demand, which then finishes
+        // the export through the normal load pipeline; anything else that is
+        // not loaded yet finishes as soon as its load does.
+        if (m_web->page()->lifecycleState() == QWebEnginePage::LifecycleState::Discarded) {
+            m_web->page()->setLifecycleState(QWebEnginePage::LifecycleState::Active);
+        }
         m_pendingExportPath = path;
+        return true;
+    }
+    // The live text can need an engine the page was built without (math or a
+    // code fence added after the last load). Rebuild the page once so the
+    // export serializes the fully rendered document; the deferred export runs
+    // when that load finishes.
+    if (m_doc && !m_bufferStale) {
+        m_text = m_doc->text();
+    }
+    if (m_pageEngines != kEngineAll && (enginesForText(m_text) & (kEngineAll & ~m_pageEngines)) != 0) {
+        m_pendingExportPath = path;
+        loadPage();
         return true;
     }
     performExport(path);
@@ -511,15 +733,20 @@ bool PreviewWidget::exportToFile(const QString &path)
 void PreviewWidget::performExport(const QString &path)
 {
     m_pendingExportPath.clear();
-    // Make sure the very latest text is on screen before grabbing the DOM.
-    if (m_doc && !m_bufferStale) {
-        m_text = m_doc->text();
-    }
+    // Callers (exportToFile, loadFinished after render()) have already pulled
+    // the live text into m_text; push it once more so the serialized DOM is
+    // guaranteed to match the current buffer.
     runJs(QStringLiteral("window.__setMarkdown(%1);").arg(jsLiteral(m_text)));
     // Re-render is synchronous in the page; give the compositor a moment and
     // then serialize the current DOM, styles and all.
     QTimer::singleShot(300, this, [this, path]() {
-        m_web->page()->runJavaScript(QStringLiteral("document.documentElement.outerHTML"), [this, path](const QVariant &html) {
+        // Serialize the current DOM through the page's export hook: __serializedHtml
+    // returns documentElement.outerHTML with the memory-saving image machinery
+    // normalized away (real srcs restored, lazy/placeholder state stripped), so
+    // a standalone file always carries plain, eager images no matter which
+    // image mode the live page runs in.
+    m_web->page()->runJavaScript(QStringLiteral("window.__serializedHtml ? window.__serializedHtml() : document.documentElement.outerHTML"),
+                                 [this, path](const QVariant &html) {
             QFile f(path);
             if (!f.open(QIODevice::WriteOnly)) {
                 qWarning("katexdown: cannot write export file %s", qPrintable(path));
@@ -558,6 +785,27 @@ void PreviewWidget::runJs(const QString &code)
     }
 }
 
+void PreviewWidget::applyImageMode()
+{
+    if (!m_loaded) {
+        return;
+    }
+    const char *mode = nullptr;
+    switch (Settings::self()->imageMode()) {
+    case Settings::DecodeAll:
+        mode = "eager";
+        break;
+    case Settings::MemorySaver:
+        mode = "saver";
+        break;
+    case Settings::Adaptive:
+    default:
+        mode = "auto";
+        break;
+    }
+    runJs(QStringLiteral("window.__setImageMode('%1');").arg(QLatin1String(mode)));
+}
+
 void PreviewWidget::render()
 {
     if (!m_loaded) {
@@ -566,6 +814,17 @@ void PreviewWidget::render()
     if (m_doc) {
         m_text = m_doc->text();
         m_bufferStale = false; // live content supersedes any close-time snapshot
+    }
+    // A document can grow into engines the page was built without (math, a
+    // code fence or front matter typed in after the last load). Rebuild the
+    // page once so the engines join; loadFinished() then renders the current
+    // text. Fully equipped pages skip the scan entirely.
+    if (m_pageEngines != kEngineAll && (enginesForText(m_text) & (kEngineAll & ~m_pageEngines)) != 0) {
+        if (qEnvironmentVariableIsSet("KATEXDOWN_DEBUG")) {
+            qDebug() << "[katexdown] rebuilding page: text needs an engine the page lacks";
+        }
+        loadPage();
+        return;
     }
     runJs(QStringLiteral("window.__setMarkdown(%1);").arg(jsLiteral(m_text)));
 }
@@ -589,6 +848,67 @@ void PreviewWidget::applyOutlineSettings()
         nums << QString::number(level);
     }
     runJs(QStringLiteral("window.__setOutlineLevels([%1]);").arg(nums.join(QLatin1Char(','))));
+}
+
+void PreviewWidget::panelClosed(bool releaseWhenIdle)
+{
+    m_panelClosed = true;
+    m_releaseWhenIdle = releaseWhenIdle;
+    m_closedSince.restart();
+    // A closed panel does not need a live page. Qt only freezes loaded, hidden
+    // pages, and it learns about the hide asynchronously — the request below
+    // can be refused while the hide event is still being delivered, so the
+    // idle timer retries every second until the freeze sticks (a frozen page
+    // keeps its renderer and content and still accepts script pushes, so
+    // toggling the panel back is instant).
+    m_idleTimer->start();
+    if (m_loaded) {
+        m_web->page()->setLifecycleState(QWebEnginePage::LifecycleState::Frozen);
+    }
+}
+
+void PreviewWidget::panelOpened()
+{
+    m_panelClosed = false;
+    m_idleTimer->stop();
+    // Unfreeze (instant for a frozen page); if the page was discarded while
+    // closed, Qt reloads it now and the normal load pipeline refreshes the
+    // mirrored content.
+    if (m_web->page()->lifecycleState() != QWebEnginePage::LifecycleState::Active) {
+        m_web->page()->setLifecycleState(QWebEnginePage::LifecycleState::Active);
+    }
+}
+
+void PreviewWidget::idleTick()
+{
+    if (!m_panelClosed) {
+        m_idleTimer->stop();
+        return;
+    }
+    if (m_web->page()->lifecycleState() == QWebEnginePage::LifecycleState::Discarded) {
+        m_idleTimer->stop(); // already released: nothing left to do while closed
+        return;
+    }
+    if (!m_loaded || !m_pendingExportPath.isEmpty()) {
+        return; // page still loading or an export is owed; try again next tick
+    }
+    const QWebEnginePage::LifecycleState state = m_web->page()->lifecycleState();
+    if (state != QWebEnginePage::LifecycleState::Frozen) {
+        // The freeze requested by panelClosed() may have been refused while Qt
+        // was still delivering the hide event; now that the page is loaded and
+        // hidden it can stick.
+        m_web->page()->setLifecycleState(QWebEnginePage::LifecycleState::Frozen);
+        return;
+    }
+    // Frozen and, in LazyKeep (releaseWhenIdle), closed long enough: release
+    // the renderer entirely. The page comes back automatically (a reload) the
+    // next time the panel opens. Eager stays frozen forever.
+    if (m_releaseWhenIdle && m_closedSince.hasExpired(m_idleDiscardMs)) {
+        if (qEnvironmentVariableIsSet("KATEXDOWN_DEBUG")) {
+            qDebug() << "[katexdown] discarding the page of the long-closed preview";
+        }
+        m_web->page()->setLifecycleState(QWebEnginePage::LifecycleState::Discarded);
+    }
 }
 
 void PreviewWidget::applyTheme()

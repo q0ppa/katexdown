@@ -202,6 +202,13 @@ static PreviewWidget *previewIn(QWidget *toolView)
     return nullptr;
 }
 
+// The web engine page behind a preview (lifecycle state checks).
+static QWebEnginePage *previewPage(PreviewWidget *preview)
+{
+    auto *view = preview->findChild<QWebEngineView *>();
+    return view ? view->page() : nullptr;
+}
+
 static QString pageText(PreviewWidget *preview)
 {
     return evalJs(preview, QStringLiteral("document.getElementById('content').innerText"));
@@ -227,6 +234,7 @@ private Q_SLOTS:
     void onePanelFollowsTheActiveDocumentEndToEnd();
     void loadingModesGovernPreviewLifetime();
     void sessionRestoreCreatesPreviewEarly();
+    void keptModesFreezeAndReleaseWhileClosed();
 
 private:
     QTemporaryDir m_dir;
@@ -494,6 +502,112 @@ void FollowModeTest::sessionRestoreCreatesPreviewEarly()
         delete alpha;
     }
     host.release();
+}
+
+// Kept modes freeze the closed preview (no CPU; toggling back stays instant),
+// and LazyKeep additionally releases the page once the panel has stayed
+// closed past the idle delay: Qt discards the page (its renderer process
+// exits) and reloads it on the next open, which re-runs the normal load
+// pipeline — the widget survives, so content comes back without recreating
+// anything. Eager freezes too but never releases while closed.
+// KATEXDOWN_IDLE_DISCARD_MS shortens the release delay for this test.
+void FollowModeTest::keptModesFreezeAndReleaseWhileClosed()
+{
+    qputenv("KATEXDOWN_IDLE_DISCARD_MS", "700");
+
+    Settings::self()->setLoadingMode(Settings::LazyKeep);
+    auto host = std::make_unique<FakeHost>();
+    host->show();
+    QTest::qWait(50);
+    KTextEditor::MainWindow wrapper(host.get());
+    connect(host.get(), &FakeHost::viewChanged, &wrapper, &KTextEditor::MainWindow::viewChanged);
+
+    {
+        DummyPlugin plugin(nullptr);
+        PluginView pluginView(&plugin, &wrapper);
+
+        KTextEditor::Document *alpha = KTextEditor::Editor::instance()->createDocument(nullptr);
+        QVERIFY(alpha->openUrl(QUrl::fromLocalFile(m_alphaPath)));
+        QTRY_VERIFY(alpha->text().contains(QLatin1String("alpha body")));
+        KTextEditor::View *alphaView = alpha->createView(nullptr);
+        host->allViews << alphaView;
+        host->setActive(alphaView);
+
+        QVERIFY(QMetaObject::invokeMethod(&pluginView, "togglePreview"));
+        QVERIFY(host->toolShown);
+        PreviewWidget *preview = previewIn(host->toolView);
+        QVERIFY(preview);
+        QVERIFY(waitForText(preview, QLatin1String("alpha body")));
+        auto *page = previewPage(preview);
+        QVERIFY(page);
+        QTRY_VERIFY(int(page->lifecycleState()) == int(QWebEnginePage::LifecycleState::Active));
+
+        // Closing the panel freezes the page: the renderer stays (toggling
+        // back is instant) but the page stops doing work.
+        QVERIFY(QMetaObject::invokeMethod(&pluginView, "togglePreview"));
+        QVERIFY(!host->toolShown);
+        QTRY_VERIFY(int(page->lifecycleState()) == int(QWebEnginePage::LifecycleState::Frozen));
+
+        // The panel stays closed past the (shortened) idle delay: the page is
+        // released — Qt shuts its renderer process down (Discarded).
+        QTRY_VERIFY(int(page->lifecycleState()) == int(QWebEnginePage::LifecycleState::Discarded));
+
+        // Re-opening restores the page through an automatic reload; the same
+        // widget serves it and the mirrored content comes back via loadFinished.
+        QVERIFY(QMetaObject::invokeMethod(&pluginView, "togglePreview"));
+        QVERIFY(host->toolShown);
+        QVERIFY(waitForText(preview, QLatin1String("alpha body")));
+        QTRY_VERIFY(int(page->lifecycleState()) == int(QWebEnginePage::LifecycleState::Active));
+
+        delete alpha;
+    }
+    host.release();
+
+    Settings::self()->setLoadingMode(Settings::Eager);
+    auto hostEager = std::make_unique<FakeHost>();
+    hostEager->show();
+    QTest::qWait(50);
+    KTextEditor::MainWindow wrapperEager(hostEager.get());
+    connect(hostEager.get(), &FakeHost::viewChanged, &wrapperEager, &KTextEditor::MainWindow::viewChanged);
+
+    {
+        DummyPlugin plugin(nullptr);
+        PluginView pluginView(&plugin, &wrapperEager);
+
+        KTextEditor::Document *alpha = KTextEditor::Editor::instance()->createDocument(nullptr);
+        QVERIFY(alpha->openUrl(QUrl::fromLocalFile(m_alphaPath)));
+        QTRY_VERIFY(alpha->text().contains(QLatin1String("alpha body")));
+        KTextEditor::View *alphaView = alpha->createView(nullptr);
+        hostEager->allViews << alphaView;
+        hostEager->setActive(alphaView);
+
+        // Eager created the preview at plugin load (hidden); show and use it.
+        PreviewWidget *preview = previewIn(hostEager->toolView);
+        QVERIFY(preview);
+        QVERIFY(QMetaObject::invokeMethod(&pluginView, "togglePreview"));
+        QVERIFY(hostEager->toolShown);
+        QVERIFY(waitForText(preview, QLatin1String("alpha body")));
+        auto *page = previewPage(preview);
+        QVERIFY(page);
+        QTRY_VERIFY(int(page->lifecycleState()) == int(QWebEnginePage::LifecycleState::Active));
+
+        QVERIFY(QMetaObject::invokeMethod(&pluginView, "togglePreview"));
+        QVERIFY(!hostEager->toolShown);
+        QTRY_VERIFY(int(page->lifecycleState()) == int(QWebEnginePage::LifecycleState::Frozen));
+
+        // Eager never releases while closed: the page stays frozen even well
+        // past the delay LazyKeep would have used to discard it.
+        QTest::qWait(2500);
+        QVERIFY(int(page->lifecycleState()) != int(QWebEnginePage::LifecycleState::Discarded));
+
+        QVERIFY(QMetaObject::invokeMethod(&pluginView, "togglePreview"));
+        QVERIFY(hostEager->toolShown);
+        QVERIFY(waitForText(preview, QLatin1String("alpha body")));
+
+        delete alpha;
+    }
+    hostEager.release();
+    Settings::self()->setLoadingMode(Settings::LazyKeep); // restore the default
 }
 
 QTEST_MAIN(FollowModeTest)

@@ -62,6 +62,14 @@ void Settings::load()
     m_loadRemoteMedia = cfg.readEntry("LoadRemoteMedia", false);
     m_useGithubCss = cfg.readEntry("GithubCss", true);
     m_loadingMode = static_cast<Settings::LoadingMode>(cfg.readEntry("LoadingMode", int(LazyKeep)));
+    const QString imgMode = cfg.readEntry("ImageMode", QStringLiteral("auto"));
+    if (imgMode == QLatin1String("saver")) {
+        m_imageMode = MemorySaver;
+    } else if (imgMode == QLatin1String("eager")) {
+        m_imageMode = DecodeAll;
+    } else {
+        m_imageMode = Adaptive;
+    }
     m_customCssFiles = cfg.readEntry("CustomCssFiles", QStringList());
     // Missing key -> defaultTocLevels(); an explicitly empty list means "no
     // levels, outline off".
@@ -77,6 +85,8 @@ void Settings::save() const
     cfg.writeEntry("LoadRemoteMedia", m_loadRemoteMedia);
     cfg.writeEntry("GithubCss", m_useGithubCss);
     cfg.writeEntry("LoadingMode", int(m_loadingMode));
+    const char *imgMode = m_imageMode == MemorySaver ? "saver" : m_imageMode == DecodeAll ? "eager" : "auto";
+    cfg.writeEntry("ImageMode", QString::fromLatin1(imgMode));
     cfg.writeEntry("CustomCssFiles", m_customCssFiles);
     QStringList levels;
     for (int level : m_tocLevels) {
@@ -132,6 +142,16 @@ void Settings::setLoadingMode(LoadingMode mode)
         return;
     }
     m_loadingMode = mode;
+    save();
+    Q_EMIT changed();
+}
+
+void Settings::setImageMode(ImageMode mode)
+{
+    if (m_imageMode == mode) {
+        return;
+    }
+    m_imageMode = mode;
     save();
     Q_EMIT changed();
 }

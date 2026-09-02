@@ -100,8 +100,10 @@ private Q_SLOTS:
     void customCssApplies();
     void githubCssCanBeDisabled();
     void exportsStandaloneHtml();
+    void imageModesControlDecoding();
     void relativeCssResolvesAgainstDataDir();
     void outlineListsConfiguredHeadings();
+    void enginesAreLoadedOnlyWhenTheTextNeedsThem();
 
 private:
     KTextEditor::Document *openDocument(const QString &text);
@@ -228,6 +230,80 @@ void RenderFeaturesTest::exportsStandaloneHtml()
     delete doc;
 }
 
+// The image memory mode decides how images behave once rendered: eager leaves
+// them alone (decode all at once), memory-saver lazy-loads and additionally
+// parks far off-screen images on a placeholder (releasing decoded memory),
+// and auto lazy-loads while arming the parking only for image-heavy
+// documents. __serializedHtml() must always hand export a plain, eager copy
+// regardless of the live mode.
+void RenderFeaturesTest::imageModesControlDecoding()
+{
+    QVERIFY(m_dir.isValid());
+    const QString png = QStringLiteral("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==");
+
+    Settings::self()->setImageMode(Settings::DecodeAll);
+    QString filler;
+    for (int i = 0; i < 600; ++i) {
+        filler += QStringLiteral("filler line %1 making the document tall\n").arg(i);
+    }
+    KTextEditor::Document *doc = openDocument(QStringLiteral("# imgs\n\n![pic](%1) inline tail\n\n%2").arg(png, filler));
+    auto preview = makePreview(doc);
+    // IntersectionObserver callbacks are driven by compositor frames: show the
+    // preview (offscreen platform still renders) so scrolls deliver them.
+    preview->resize(800, 600);
+    preview->show();
+    QVERIFY(waitForPageText(preview.get(), QLatin1String("imgs")));
+
+    // Eager: images carry no lazy attributes and keep their real src.
+    QVERIFY(waitForCond(preview.get(),
+                        QStringLiteral("(function () { var i = document.querySelector('#content img'); return (i.getAttribute('loading') === null) + '|' + (i.src.indexOf('data:image/png') === 0); })()"),
+                        QStringLiteral("true|true")));
+
+    // __serializedHtml() hands export a plain image no matter the live mode.
+    const QString serializeImg = QStringLiteral(
+        "(function () { var d = new DOMParser().parseFromString(window.__serializedHtml(), 'text/html'); "
+        "var im = d.querySelector('img'); "
+        "return im.getAttribute('src') + '|' + im.getAttribute('loading') + '|' + im.getAttribute('data-kdx') + '|' + im.getAttribute('width'); })()");
+    QCOMPARE(evalJs(preview.get(), serializeImg), png + QStringLiteral("|null|null|null"));
+
+    // Memory-saver: lazy attributes; the image decodes near the top (its box
+    // gets recorded for stable placeholders) ...
+    Settings::self()->setImageMode(Settings::MemorySaver);
+    QVERIFY(waitForCond(preview.get(),
+                        QStringLiteral("document.querySelector('#content img').getAttribute('loading')"),
+                        QStringLiteral("lazy")));
+    QVERIFY(waitForCond(preview.get(),
+                        QStringLiteral("(document.querySelector('#content img').dataset.kdxSized || '')"),
+                        QStringLiteral("1")));
+
+    // ... and once scrolled far away it is parked on a 1x1 placeholder.
+    evalJs(preview.get(), QStringLiteral("window.scrollTo(0, document.body.scrollHeight); 'ok'"));
+    QVERIFY(waitForCond(preview.get(),
+                        QStringLiteral("(function () { var i = document.querySelector('#content img'); return ((i.dataset.kdx || '') !== '') + '|' + (i.src.indexOf('data:image/gif') === 0); })()"),
+                        QStringLiteral("true|true")));
+    // Export serialization still carries the real src, machinery stripped.
+    QCOMPARE(evalJs(preview.get(), serializeImg), png + QStringLiteral("|null|null|null"));
+
+    // Scrolling back to the top restores the image in front of the viewport.
+    evalJs(preview.get(), QStringLiteral("window.scrollTo(0, 0); 'ok'"));
+    QVERIFY(waitForCond(preview.get(),
+                        QStringLiteral("(function () { var i = document.querySelector('#content img'); return ((i.dataset.kdx || '') === '') + '|' + (i.src.indexOf('data:image/png') === 0); })()"),
+                        QStringLiteral("true|true")));
+
+    // Auto with a one-image document: lazy attributes only, never parked.
+    Settings::self()->setImageMode(Settings::Adaptive);
+    QVERIFY(waitForCond(preview.get(),
+                        QStringLiteral("document.querySelector('#content img').getAttribute('loading')"),
+                        QStringLiteral("lazy")));
+    evalJs(preview.get(), QStringLiteral("window.scrollTo(0, document.body.scrollHeight); 'ok'"));
+    QVERIFY(waitForCond(preview.get(),
+                        QStringLiteral("(function () { var i = document.querySelector('#content img'); return (i.dataset.kdx || '') === ''; })()"),
+                        QStringLiteral("true")));
+
+    delete doc;
+    Settings::self()->setImageMode(Settings::Adaptive); // leave the default for later tests
+}
+
 void RenderFeaturesTest::relativeCssResolvesAgainstDataDir()
 {
     QVERIFY(m_dir.isValid());
@@ -315,6 +391,67 @@ void RenderFeaturesTest::outlineListsConfiguredHeadings()
     delete docNone;
 
     Settings::self()->setTocLevels({1, 2, 3, 4, 5}); // leave the default for later tests
+}
+
+// The heavy engines (KaTeX, highlight.js, js-yaml) are inlined into a page
+// only when the mirrored text can use them. Introducing such content while the
+// preview is open triggers a one-time page rebuild; switching to a document
+// that no longer needs an engine drops it again. KaTeX assets are faked in a
+// temporary data dir so the test does not depend on tools/fetch-assets.py
+// having been run.
+void RenderFeaturesTest::enginesAreLoadedOnlyWhenTheTextNeedsThem()
+{
+    QVERIFY(m_dir.isValid());
+    const QByteArray oldDataDir = qgetenv("KATEXDOWN_DATA_DIR");
+    const auto writeAsset = [this](const QString &name, const QByteArray &body) {
+        QFile f(m_dir.filePath(name));
+        return f.open(QIODevice::WriteOnly) && f.write(body) == body.size();
+    };
+    QVERIFY(writeAsset(QStringLiteral("katex.min.js"),
+                       QByteArrayLiteral("window.katex = { renderToString: function () { return ''; } };\n")));
+    // A no-op plugin: enough for markdown-it to accept the engine wiring.
+    QVERIFY(writeAsset(QStringLiteral("texmath.min.js"),
+                       QByteArrayLiteral("window.texmath = function () { return function () {}; };\n")));
+    qputenv("KATEXDOWN_DATA_DIR", m_dir.path().toUtf8());
+
+    // Plain prose: no engine at all is loaded into the page.
+    KTextEditor::Document *doc = openDocument(QStringLiteral("# plain\n\nsome prose.\n"));
+    auto preview = makePreview(doc);
+    QVERIFY(waitForPageText(preview.get(), QLatin1String("some prose")));
+    // typeof window.katex is useless here: the page always carries a
+    // <style id="katex"> element, and element ids become window globals.
+    // Check whether the engine script itself made it into the page instead.
+    const QString katexMarker = QStringLiteral(
+        "(function () { for (var i = 0; i < document.scripts.length; ++i) { "
+        "if (document.scripts[i].textContent.indexOf('renderToString') >= 0) return 'loaded'; } return 'absent'; })()");
+    QCOMPARE(evalJs(preview.get(), katexMarker), QStringLiteral("absent"));
+    QCOMPARE(evalJs(preview.get(), QStringLiteral("typeof window.hljs")), QStringLiteral("undefined"));
+    QCOMPARE(evalJs(preview.get(), QStringLiteral("typeof window.jsyaml")), QStringLiteral("undefined"));
+
+    // Math typed in later: the page rebuilds itself once and KaTeX arrives.
+    doc->setText(QStringLiteral("# math\n\ninline $x^2$ now.\n"));
+    QVERIFY(waitForCond(preview.get(), katexMarker, QStringLiteral("loaded")));
+    QVERIFY(waitForCond(preview.get(), QStringLiteral("typeof window.texmath"), QStringLiteral("function")));
+    QCOMPARE(evalJs(preview.get(), QStringLiteral("typeof window.hljs")), QStringLiteral("undefined"));
+
+    // A fenced code block brings the syntax highlighter along (KaTeX stays).
+    doc->setText(QStringLiteral("# code\n\n```js\nvar a = 1;\n```\n\nand $x$ again.\n"));
+    QVERIFY(waitForCond(preview.get(), QStringLiteral("typeof window.hljs"), QStringLiteral("object")));
+    QVERIFY(waitForCond(preview.get(), katexMarker, QStringLiteral("loaded")));
+
+    // Front matter pulls in js-yaml — and a document that needs none of the
+    // engines drops them all on the rebuild.
+    doc->setText(QStringLiteral("---\ntitle: t\n---\n\nbody text\n"));
+    QVERIFY(waitForCond(preview.get(), QStringLiteral("typeof window.jsyaml"), QStringLiteral("object")));
+    QVERIFY(waitForCond(preview.get(), katexMarker, QStringLiteral("absent")));
+    QVERIFY(waitForCond(preview.get(), QStringLiteral("typeof window.hljs"), QStringLiteral("undefined")));
+
+    delete doc;
+    if (oldDataDir.isNull()) {
+        qunsetenv("KATEXDOWN_DATA_DIR");
+    } else {
+        qputenv("KATEXDOWN_DATA_DIR", oldDataDir);
+    }
 }
 
 QTEST_MAIN(RenderFeaturesTest)

@@ -28,6 +28,15 @@ body {
   }
 }
 
+/* Image memory modes (html[data-pv-imgmode], set by preview.js): managed
+   images carry width/height recorded from their first decode so the layout box
+   survives parking on a 1x1 placeholder; height:auto makes that box scale with
+   max-width:100% while the recorded aspect ratio is honored. */
+html[data-pv-imgmode="auto"] .markdown-body img,
+html[data-pv-imgmode="saver"] .markdown-body img {
+  height: auto;
+}
+
 /* Floating section outline: a round button (bottom right) opening the list of
    headings the config page selected; clicking an entry jumps to that section.
    Colors come from the same CSS custom properties as the rest of the page. */

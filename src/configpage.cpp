@@ -71,19 +71,36 @@ ConfigPage::ConfigPage(QWidget *parent)
     form->addRow(i18n("GitHub variant:"), m_variant);
 
     m_loading = new QComboBox(this);
-    m_loading->addItem(i18n("Lazy — load on first open, keep loaded after closing"), Settings::LazyKeep);
+    m_loading->addItem(i18n("Lazy — load on first open; released when closed for a while"), Settings::LazyKeep);
     m_loading->addItem(i18n("Lazy — free everything when the preview is closed (minimal memory)"), Settings::LazyUnload);
     m_loading->addItem(i18n("Eager — load together with Kate (always ready)"), Settings::Eager);
     form->addRow(i18n("Preview loading:"), m_loading);
     auto *loadingHint = new QLabel(
         i18n("The preview is a web view with its own renderer process, which is what costs memory.\n"
-             "\u2022 Lazy (default): created the first time you open the preview, then kept — toggling is instant.\n"
+             "\u2022 Lazy (default): created the first time you open the preview. Closing it freezes the page (no CPU, \n"
+             "  instant re-open); once the panel has stayed closed for about a minute the page is released entirely, \n"
+             "  and re-opening restores it automatically.\n"
              "\u2022 Lazy + free on close: destroyed whenever the panel is hidden; re-opening re-creates it (a short delay).\n"
-             "\u2022 Eager: created at startup, the current behavior."),
+             "\u2022 Eager: created at startup and never released; frozen while closed."),
         this);
     loadingHint->setWordWrap(true);
     loadingHint->setEnabled(false);
     form->addRow(QString(), loadingHint);
+
+    m_imageMode = new QComboBox(this);
+    m_imageMode->addItem(i18n("Eager — decode every image at once (classic)"), Settings::DecodeAll);
+    m_imageMode->addItem(i18n("Auto — lazy decode; off-screen images are released in image-heavy documents (default)"), Settings::Adaptive);
+    m_imageMode->addItem(i18n("Memory-saver — only images near the viewport stay decoded"), Settings::MemorySaver);
+    form->addRow(i18n("Image memory mode:"), m_imageMode);
+    auto *imageHint = new QLabel(
+        i18n("How the preview deals with the images of large documents. The web engine decodes every image in a page at once when left to itself, so a document with hundreds of images can cost gigabytes of renderer memory.\n"
+             "\u2022 Eager: everything decodes immediately — the classic behavior (heaviest).\n"
+             "\u2022 Auto (default): images only decode as they approach the viewport; when a document grows many images, decoded memory is additionally released as images scroll out of it.\n"
+             "\u2022 Memory-saver: only the images near the viewport ever decode, and each is released the moment it scrolls away. Renderer memory stays flat no matter how many images the document has."),
+        this);
+    imageHint->setWordWrap(true);
+    imageHint->setEnabled(false);
+    form->addRow(QString(), imageHint);
 
     m_githubCss = new QCheckBox(i18n("Use the built-in GitHub stylesheet"), this);
     form->addRow(QString(), m_githubCss);
@@ -210,6 +227,9 @@ ConfigPage::ConfigPage(QWidget *parent)
     connect(m_loading, &QComboBox::currentIndexChanged, this, [this]() {
         Q_EMIT changed();
     });
+    connect(m_imageMode, &QComboBox::currentIndexChanged, this, [this]() {
+        Q_EMIT changed();
+    });
     for (int level = 1; level <= 6; ++level) {
         connect(m_tocLevel[level - 1], &QCheckBox::toggled, this, [this]() { Q_EMIT changed(); });
     }
@@ -331,6 +351,7 @@ void ConfigPage::apply()
     s->setLoadRemoteMedia(m_remoteMedia->isChecked());
     s->setUseGithubCss(m_githubCss->isChecked());
     s->setLoadingMode(static_cast<Settings::LoadingMode>(m_loading->currentData().toInt()));
+    s->setImageMode(static_cast<Settings::ImageMode>(m_imageMode->currentData().toInt()));
     QList<int> levels;
     for (int level = 1; level <= 6; ++level) {
         if (m_tocLevel[level - 1]->isChecked()) {
@@ -353,6 +374,7 @@ void ConfigPage::reset()
     m_remoteMedia->setChecked(s->loadRemoteMedia());
     m_githubCss->setChecked(s->useGithubCss());
     m_loading->setCurrentIndex(m_loading->findData(s->loadingMode()));
+    m_imageMode->setCurrentIndex(m_imageMode->findData(s->imageMode()));
     m_cssList->clear();
     const QStringList css = s->customCssFiles();
     for (const QString &file : css) {
@@ -372,6 +394,7 @@ void ConfigPage::defaults()
     m_remoteMedia->setChecked(false);
     m_githubCss->setChecked(true);
     m_loading->setCurrentIndex(m_loading->findData(Settings::LazyKeep));
+    m_imageMode->setCurrentIndex(m_imageMode->findData(Settings::Adaptive));
     m_cssList->clear();
     for (int level = 1; level <= 6; ++level) {
         m_tocLevel[level - 1]->setChecked(level <= 5); // H1-H5 default, H6 off

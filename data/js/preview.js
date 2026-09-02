@@ -5,6 +5,11 @@
 //   __useHljsTheme(name)     enable one bundled hljs <style>, disable the rest
 //   __setCodeCss(css)        inject a generated hljs theme (Application mode)
 //   __setColorScheme(dark)   set color-scheme + data attribute on <html>
+//   __setImageMode(mode)     image decode policy: 'eager' | 'auto' | 'saver'
+//                            (see the image-mode section below)
+//   __serializedHtml()       outerHTML with the image machinery normalized
+//                            away (real srcs, no lazy/placeholder state) —
+//                            what export serializes
 
 (function () {
   "use strict";
@@ -45,6 +50,20 @@
 
   md.use(taskLists);
   md.use(githubAlerts);
+
+  // Image decode policy (driven from the C++ settings): the eager mode leaves
+  // markdown-it's output alone so every image decodes at once (the classic
+  // behavior); auto/saver give every image the native lazy-loading +
+  // async-decoding attributes, and the image manager further below parks the
+  // far off-screen ones on a placeholder so Chromium never decodes them.
+  var kdxDefaultImage = md.renderer.rules.image;
+  md.renderer.rules.image = function (tokens, idx, options, env, self) {
+    if (imgMode !== "eager") {
+      tokens[idx].attrSet("loading", "lazy");
+      tokens[idx].attrSet("decoding", "async");
+    }
+    return kdxDefaultImage(tokens, idx, options, env, self);
+  };
 
   // Math (LaTeX): texmath.min.js defines a top-level `texmath` function when
   // inlined as a classic script. Both assets come from the data dir (see
@@ -208,6 +227,7 @@
     var fm = frontMatterTable(current);
     el.innerHTML = (fm ? fm.html : "") + md.render(fm ? fm.body : current);
     rebuildOutline();
+    armImages();
   }
 
   window.__setMarkdown = function (text) {
@@ -253,6 +273,244 @@
   window.__setColorScheme = function (dark) {
     document.documentElement.setAttribute("data-pv-scheme", dark ? "dark" : "light");
     document.documentElement.style.setProperty("color-scheme", dark ? "dark" : "light");
+  };
+
+  // ---------------------------------------------------------------------
+  // Image decode policy ("image memory mode"), mirroring Settings::ImageMode:
+  //   "eager"  every image decodes as soon as it is in the document, no matter
+  //            where it sits — the classic, heaviest behavior.
+  //   "auto"   images carry loading="lazy" (decode as they approach the
+  //            viewport). Once a document passes IMG_AUTO_ARM_AT images the
+  //            far off-screen ones are additionally parked on a transparent
+  //            placeholder; decoded renderer memory then stays proportional to
+  //            the region around the viewport instead of the whole document.
+  //   "saver"  the same machinery as auto, but always on and with a tighter
+  //            keep zone (only images near the viewport ever decode, and each
+  //            is released the moment it scrolls out of the zone).
+  // Parking: an image's real src is stashed in data-kdx and replaced with a
+  // 1x1 transparent GIF, so Chromium has nothing left to decode — and the
+  // decoded bitmap of an image that scrolled away is released. An
+  // IntersectionObserver whose root margin is the keep zone swaps the real src
+  // back in as an image approaches the viewport and parks it again once it has
+  // left. Width/height attributes plus an explicit aspect-ratio are recorded on
+  // first decode so the layout box survives the swaps (base.css adds
+  // height:auto for the modes that manage images).
+  var imgMode = "auto";
+  // Auto arms the parking machinery once a document passes this many images.
+  var IMG_AUTO_ARM_AT = 12;
+  // Keep-zone size as a multiple of the viewport height (per mode): images
+  // within viewport +/- zone keep (or regain) their real src.
+  var IMG_ZONE_FACTOR = { auto: 2.5, saver: 1.3 };
+  var IMG_PLACEHOLDER =
+    "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+  var imgObserver = null;
+  var imgRearmTimer = null;
+
+  function imgZonePx() {
+    var f = imgMode === "saver" ? IMG_ZONE_FACTOR.saver : IMG_ZONE_FACTOR.auto;
+    return Math.max(400, Math.round(window.innerHeight * f));
+  }
+
+  // Remember the image's box (from its first decode) so swapping the src to
+  // the 1x1 placeholder does not collapse the layout. Author-pinned dimensions
+  // are left alone (kdxSized "0"); otherwise the natural size is stored as
+  // width/height attributes plus an explicit aspect ratio.
+  function recordDims(img) {
+    if (img.dataset.kdxSized || img.naturalWidth <= 0 || img.naturalHeight <= 0) {
+      return;
+    }
+    if (img.getAttribute("width") === null && img.getAttribute("height") === null) {
+      img.setAttribute("width", String(img.naturalWidth));
+      img.setAttribute("height", String(img.naturalHeight));
+      img.style.aspectRatio = img.naturalWidth + " / " + img.naturalHeight;
+      img.dataset.kdxSized = "1";
+    } else {
+      img.dataset.kdxSized = "0";
+    }
+  }
+
+  // Park an image: stash the real src and drop a placeholder in (freeing the
+  // decoded bitmap once it had one).
+  function swapOut(img) {
+    var src = img.getAttribute("src");
+    if (img.dataset.kdx || img.dataset.kdxSkip || img.dataset.kdxFailed || !src || src === IMG_PLACEHOLDER) {
+      return;
+    }
+    recordDims(img);
+    img.dataset.kdx = src;
+    img.removeAttribute("srcset");
+    img.setAttribute("src", IMG_PLACEHOLDER);
+  }
+
+  // Bring an image back: restore the real src (the placeholder disappears; the
+  // recorded box keeps the layout stable while it decodes again).
+  function swapIn(img) {
+    var real = img.dataset.kdx;
+    if (!real) {
+      return;
+    }
+    delete img.dataset.kdx;
+    img.removeAttribute("src");
+    img.setAttribute("src", real);
+  }
+
+  function imgInZone(img) {
+    var r = img.getBoundingClientRect();
+    var z = imgZonePx();
+    return r.bottom > -z && r.top < window.innerHeight + z;
+  }
+
+  function onImgLoad(e) {
+    var img = e.target;
+    recordDims(img);
+    // A decode may finish after the image already scrolled out of the zone
+    // (fast scrolling): release it right away instead of waiting for the
+    // observer's next crossing.
+    if (!img.dataset.kdx && !imgInZone(img)) {
+      swapOut(img);
+    }
+  }
+
+  function onImgError(e) {
+    // Leave failed images alone: no decode memory to save, and a broken-image
+    // indicator is more honest than an empty placeholder.
+    e.target.dataset.kdxFailed = "1";
+  }
+
+  function handleImgIntersect(entries) {
+    for (var i = 0; i < entries.length; i++) {
+      var entry = entries[i];
+      var img = entry.target;
+      if (img.dataset.kdxSkip || img.dataset.kdxFailed) {
+        continue;
+      }
+      if (entry.isIntersecting) {
+        // Re-entered the keep zone: decode again.
+        if (img.dataset.kdx) {
+          swapIn(img);
+        }
+      } else if (!img.dataset.kdx) {
+        // Left the keep zone: release the decoded bitmap.
+        swapOut(img);
+      }
+    }
+  }
+
+  // (Re)apply the current mode to the rendered document. Called at the end of
+  // every re-render, so it works on freshly built elements; also re-runs on
+  // resize (the keep zone scales with the viewport).
+  function armImages() {
+    var content = document.getElementById("content");
+    if (imgObserver) {
+      imgObserver.disconnect();
+      imgObserver = null;
+    }
+    if (!content) {
+      return;
+    }
+    document.documentElement.setAttribute("data-pv-imgmode", imgMode);
+    if (imgMode === "eager") {
+      return; // eager mode never touches images
+    }
+    var imgs = content.querySelectorAll("img");
+    var manage = imgMode === "saver" || imgs.length > IMG_AUTO_ARM_AT;
+    var i;
+    for (i = 0; i < imgs.length; i++) {
+      var img = imgs[i];
+      if (!img.hasAttribute("loading")) {
+        img.setAttribute("loading", "lazy");
+      }
+      if (!img.hasAttribute("decoding")) {
+        img.setAttribute("decoding", "async");
+      }
+      if (img.dataset.kdxSkip) {
+        continue;
+      }
+      if (img.hasAttribute("srcset")) {
+        img.dataset.kdxSkip = "1"; // srcset stays native-lazy only
+        continue;
+      }
+      if (!manage) {
+        continue;
+      }
+      if (!img.dataset.kdxListen) {
+        img.dataset.kdxListen = "1";
+        img.addEventListener("load", onImgLoad);
+        img.addEventListener("error", onImgError);
+      }
+      if (img.dataset.kdxFailed || img.dataset.kdx || !img.getAttribute("src")) {
+        continue;
+      }
+      recordDims(img);
+      if (!imgInZone(img)) {
+        swapOut(img); // far off-screen: park before Chromium can decode it
+      }
+    }
+    if (!manage) {
+      return;
+    }
+    var zone = imgZonePx() + "px 0px " + imgZonePx() + "px 0px";
+    imgObserver = new IntersectionObserver(handleImgIntersect, { rootMargin: zone });
+    for (i = 0; i < imgs.length; i++) {
+      var el = imgs[i];
+      if (!el.dataset.kdxSkip && !el.dataset.kdxFailed) {
+        imgObserver.observe(el);
+      }
+    }
+  }
+
+  function scheduleImgRearm() {
+    if (imgMode === "eager" || imgRearmTimer) {
+      return;
+    }
+    imgRearmTimer = setTimeout(function () {
+      imgRearmTimer = null;
+      armImages();
+    }, 150);
+  }
+  window.addEventListener("resize", scheduleImgRearm);
+
+  window.__setImageMode = function (mode) {
+    var clean = mode === "eager" || mode === "saver" ? mode : "auto";
+    document.documentElement.setAttribute("data-pv-imgmode", clean);
+    if (imgMode === clean) {
+      return;
+    }
+    imgMode = clean;
+    rerender(); // re-applies the renderer rule and re-arms the images
+  };
+
+  // Export hook: the standalone HTML must always carry plain, eager images
+  // (real srcs, no lazy/placeholder state, no recorded sizes), regardless of
+  // the live page's image mode. Work on a detached clone so the live page is
+  // untouched (nothing re-fetches or re-decodes).
+  window.__serializedHtml = function () {
+    var root = document.documentElement.cloneNode(true);
+    var imgs = root.querySelectorAll("img");
+    for (var i = 0; i < imgs.length; i++) {
+      var img = imgs[i];
+      if (img.dataset.kdx) {
+        img.setAttribute("src", img.dataset.kdx);
+      }
+      if (img.dataset.kdxSrcset) {
+        img.setAttribute("srcset", img.dataset.kdxSrcset);
+      }
+      if (img.dataset.kdxSized === "1") {
+        img.removeAttribute("width");
+        img.removeAttribute("height");
+        img.style.removeProperty("aspect-ratio");
+      }
+      img.removeAttribute("loading");
+      img.removeAttribute("decoding");
+      img.removeAttribute("data-kdx");
+      img.removeAttribute("data-kdx-srcset");
+      img.removeAttribute("data-kdx-skip");
+      img.removeAttribute("data-kdx-sized");
+      img.removeAttribute("data-kdx-failed");
+      img.removeAttribute("data-kdx-listen");
+    }
+    root.removeAttribute("data-pv-imgmode");
+    return root.outerHTML;
   };
 
   // ---------------------------------------------------------------------

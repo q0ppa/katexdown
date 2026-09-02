@@ -29,13 +29,17 @@ class View;
  * Memory model (see Settings::LoadingMode): the tool-view shell (a plain
  * QWidget) always exists so kate's sidebar/View-menu/session handling works,
  * but the expensive preview (a QWebEngineView with its own renderer process)
- * is created and destroyed according to the selected loading mode:
- *   LazyKeep    on first panel show, kept afterwards        (default)
+ * is created and released according to the selected loading mode:
+ *   LazyKeep    on first panel show; while the panel is closed the page is
+ *               frozen and, once the panel stays closed for a while, released
+ *               entirely (renderer exits; re-opening reloads it)
  *   LazyUnload  on first panel show, destroyed on every hide
- *   Eager       at plugin load
+ *   Eager       at plugin load; frozen while closed, never released
  * Visibility is tracked through real show/hide events on the tool view, so
  * toggling via kate's own "Show Preview" menu entry or the sidebar button
- * obeys the same rules as the Katexdown action.
+ * obeys the same rules as the Katexdown action. The freeze/release behavior
+ * lives in PreviewWidget (panelClosed/panelOpened); hiding only forwards the
+ * policy decision here.
  */
 class PluginView : public QObject, public KXMLGUIClient, public KTextEditor::SessionConfigInterface
 {

@@ -21,14 +21,40 @@ public:
         Light,
         Dark,
     };
-    // When the heavy preview (web view + renderer process) exists:
-    //   LazyKeep    create on first open, keep it after closing (default)
-    //   LazyUnload  create on first open, destroy it on every close
-    //   Eager       create at Kate startup (plugin enabled)
+    // When the heavy preview (web view + renderer process) exists, and what
+    // happens to it while the panel is closed:
+    //   LazyKeep    create on first open. On close the page is frozen (no CPU,
+    //               instant toggle back); once the panel has stayed closed for
+    //               a while the page is discarded, so a preview left closed
+    //               does not keep a renderer process resident — re-opening
+    //               reloads it automatically (default)
+    //   LazyUnload  create on first open, destroy the whole preview on every
+    //               close (minimal memory; re-opening re-creates it)
+    //   Eager       create at Kate startup; frozen while closed, never released
+    // The freeze/release policy itself lives in PreviewWidget
+    // (panelClosed/panelOpened) and applies only to genuinely closed panels
+    // (hiding the whole Kate window does not count).
     enum LoadingMode {
         LazyKeep = 0,
         LazyUnload = 1,
         Eager = 2,
+    };
+    // How the page treats images once a document is rendered (see the image
+    // manager in data/js/preview.js, driven through __setImageMode):
+    //   DecodeAll    every image decodes as soon as it is in the document
+    //                (classic behavior, heaviest with many images)
+    //   Auto         images load lazily (decode as they approach the
+    //                viewport); once a document gets image-heavy the
+    //                off-screen images are additionally unloaded again.
+    //                The default — it leans towards MemorySaver.
+    //   MemorySaver  only images near the viewport ever decode; decoded
+    //                memory is released as soon as an image scrolls out of
+    //                the keep zone (renderer memory no longer scales with
+    //                the image count of the document).
+    enum ImageMode {
+        DecodeAll = 0,
+        Adaptive = 1,
+        MemorySaver = 2,
     };
 
     static Settings *self();
@@ -47,6 +73,10 @@ public:
     {
         return m_loadingMode;
     }
+    ImageMode imageMode() const
+    {
+        return m_imageMode;
+    }
     QStringList customCssFiles() const
     {
         return m_customCssFiles;
@@ -63,6 +93,7 @@ public:
     void setLoadRemoteMedia(bool enabled);
     void setUseGithubCss(bool enabled);
     void setLoadingMode(LoadingMode mode);
+    void setImageMode(ImageMode mode);
     void setCustomCssFiles(const QStringList &files);
     void setTocLevels(const QList<int> &levels);
 
@@ -82,6 +113,8 @@ private:
     // custom stylesheet fully own the layout instead of layering on GitHub's.
     bool m_useGithubCss = true;
     LoadingMode m_loadingMode = LazyKeep;
+    // Image decode policy; Auto by default (see enum above).
+    ImageMode m_imageMode = Adaptive;
     // Custom stylesheets applied after the bundled github-markdown.css, in
     // listed order (later files win). Relative paths resolve against the
     // Katexdown data dir (see katexdownpaths.h).

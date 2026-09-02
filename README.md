@@ -160,14 +160,35 @@ setting on the config page:
 
 | Mode | When the web view exists | When it is freed |
 |------|--------------------------|------------------|
-| Lazy (default) | first time the preview is opened | stays loaded after closing — toggling stays instant |
+| Lazy (default) | first time the preview is opened | closed panel is frozen (no CPU, toggling stays instant); after ~1 minute closed the page is released, and re-opening restores it automatically |
 | Lazy + free on close | first time the preview is opened | destroyed on every close; re-opening rebuilds it (a short delay) |
-| Eager | at Kate startup (plugin enabled) | only when Kate exits |
+| Eager | at Kate startup (plugin enabled) | frozen while closed; only when Kate exits |
 
 With either lazy mode, Kate runs with no extra renderer process until you
 actually open a preview. Toggling through kate's own "Show Preview" menu entry
 or the sidebar button follows the same rules. Note: after a restart the panel
 opens closed in the lazy modes (that is the point — nothing loaded until asked).
+
+A preview page is also trimmed to the document at hand: KaTeX, the syntax
+highlighter and the YAML front-matter parser are only loaded when the current
+document actually uses math, fenced code blocks or front matter (a page
+refreshes itself once when you type such content in later).
+
+Inside a rendered page the same idea applies to images — the **Image memory
+mode** setting decides how much the web engine decodes at once:
+
+| Mode | Image behavior in the preview |
+|------|-------------------------------|
+| Eager | every image decodes as soon as it is rendered — the classic, heaviest behavior |
+| Auto (default) | images decode only as they approach the viewport; once a document grows many images (roughly a dozen or more), off-screen decoded memory is released again |
+| Memory-saver | only images near the viewport ever decode; each is released the moment it scrolls out of the keep zone, so renderer memory stays flat no matter how many images the document has |
+
+Hundreds of images at once are what makes a web engine heavy: every decoded
+photo is width × height × 4 bytes in the renderer. The lazy decode + keep-zone
+unloading lives in `data/js/preview.js` (parked images keep their layout box
+via dimensions recorded on first decode, so scrolling stays stable), and it
+only ever affects the *live* page — **Export HTML…** always writes plain,
+eager images into the standalone file.
 
 ## Math (LaTeX) and custom stylesheets
 

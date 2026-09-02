@@ -207,7 +207,15 @@ void PluginView::onPanelShown()
 
 void PluginView::activatePanel()
 {
-    if (!m_panelVisible || m_preview) {
+    if (!m_panelVisible) {
+        followActiveView();
+        return;
+    }
+    if (m_preview) {
+        // Returning from a closed state: unfreeze, and if the page was
+        // discarded while closed Qt reloads it here (instant when it was only
+        // frozen). The load pipeline then refreshes the mirrored content.
+        m_preview->panelOpened();
         followActiveView();
         return;
     }
@@ -231,8 +239,21 @@ void PluginView::onPanelHidden()
         qDebug() << "[katexdown] panel HIDDEN, preview:" << m_preview.data()
                  << "| mode:" << int(loadingMode());
     }
-    if (loadingMode() == Settings::LazyUnload) {
+    switch (loadingMode()) {
+    case Settings::LazyUnload:
         destroyPreview();
+        break;
+    case Settings::LazyKeep:
+    case Settings::Eager:
+        // Kept modes: the widget (and its page) survives the close. The page
+        // is frozen immediately so a closed preview costs no CPU; LazyKeep
+        // additionally releases it (renderer exit) once the panel has stayed
+        // closed for a while, so the memory is freed without the widget being
+        // torn down. Destroying the widget is LazyUnload's stronger promise.
+        if (m_preview) {
+            m_preview->panelClosed(loadingMode() == Settings::LazyKeep);
+        }
+        break;
     }
 }
 

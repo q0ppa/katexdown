@@ -39,6 +39,7 @@ private:
     QComboBox *m_mode = nullptr;
     QComboBox *m_variant = nullptr;
     QComboBox *m_loading = nullptr;
+    QComboBox *m_imageMode = nullptr;
     QCheckBox *m_githubCss = nullptr;
     QCheckBox *m_remoteMedia = nullptr;
     // Heading level 1..6 -> index 0..5.
