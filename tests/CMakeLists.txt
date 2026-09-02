@@ -14,6 +14,15 @@ add_executable(renderfeaturestest
     ../data/resources.qrc
 )
 
+# Pins the renderer-memory maintenance: bounded RSS across document switches,
+# the same-document recycle, and image survival across a recycle.
+add_executable(rendermemorytest
+    rendermemorytest.cpp
+    ../src/previewwidget.cpp
+    ../src/settings.cpp
+    ../data/resources.qrc
+)
+
 # Exercises PluginView + PreviewWidget against a fake kate main-window host.
 add_executable(followmodetest
     followmodetest.cpp
@@ -23,7 +32,7 @@ add_executable(followmodetest
     ../data/resources.qrc
 )
 
-foreach(tgt previewlifecycletest renderfeaturestest followmodetest)
+foreach(tgt rendermemorytest previewlifecycletest renderfeaturestest followmodetest)
     target_include_directories(${tgt} PRIVATE ../src)
 
     target_link_libraries(${tgt} PRIVATE

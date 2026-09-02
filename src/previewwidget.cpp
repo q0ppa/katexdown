@@ -31,6 +31,8 @@
 
 #include <functional>
 
+#include <limits>
+
 #include <KLocalizedString>
 #include <KSyntaxHighlighting/Theme>
 #include <KTextEditor/Document>
@@ -462,12 +464,36 @@ PreviewWidget::PreviewWidget(KTextEditor::MainWindow *mainWindow, KTextEditor::V
     connect(m_debounce, &QTimer::timeout, this, &PreviewWidget::render);
 
     // A discarded page has no renderer: until Qt reloads it (on the next
-    // panel open) it is not "loaded", so renders/theme pushes skip it and the
-    // load pipeline re-applies everything once the page is back.
+    // panel open, or — during a maintenance recycle — through loadPage()) it
+    // is not "loaded", so renders/theme pushes skip it and the load pipeline
+    // re-applies everything once the page is back. A discarded renderer has
+    // given every byte back, so the maintenance counters reset here; the same
+    // is true for a page the closed-panel policy froze (QtWebEngine's freeze
+    // runs Chromium's memory purge, see lazyrender.md). Discard is also the
+    // recycle primitive: while m_recycling is set, the discard was requested
+    // by the maintenance cycle and the mirrored document is loaded straight
+    // into the fresh renderer instead of waiting for the panel to reopen.
     connect(page, &QWebEnginePage::lifecycleStateChanged, this, [this](QWebEnginePage::LifecycleState state) {
         if (state == QWebEnginePage::LifecycleState::Discarded) {
             m_loaded = false;
+            m_memEstimate = 0;
+            m_lastRecycle.restart();
+            if (m_recycling && !m_panelClosed && m_pendingExportPath.isEmpty()) {
+                // The recycle's fresh page: load the mirrored document now.
+                loadPage();
+            } else if (m_recycling && m_panelClosed) {
+                // The panel closed mid-cycle: the closed-panel policy owns the
+                // discarded page from here on.
+                m_recycling = false;
+                m_recycleScrollY = -1;
+                m_recycleTimer->stop();
+            }
+        } else if (state == QWebEnginePage::LifecycleState::Frozen) {
+            // Closed-panel freeze ran Chromium's purge: the estimate is spent.
+            m_memEstimate = 0;
+            m_lastRecycle.restart();
         }
+        noteActivity();
         if (qEnvironmentVariableIsSet("KATEXDOWN_DEBUG")) {
             qDebug() << "[katexdown] page lifecycle state" << int(state);
         }
@@ -481,12 +507,32 @@ PreviewWidget::PreviewWidget(KTextEditor::MainWindow *mainWindow, KTextEditor::V
     if (overrideMs > 0) {
         m_idleDiscardMs = overrideMs;
     }
+    // Renderer-memory maintenance knobs (see idleTick / performMemoryRecycle):
+    // env overrides double as test hooks, exactly like the discard delay.
+    readMemTuning();
+    // Safety net for a recycle: if the discard never sticks or the fresh load
+    // never finishes, the page must not stay hidden. (The normal path ends a
+    // recycle at loadFinished, which beats this timer by orders of magnitude.)
+    m_recycleTimer = new QTimer(this);
+    m_recycleTimer->setSingleShot(true);
+    connect(m_recycleTimer, &QTimer::timeout, this, &PreviewWidget::abortRecycle);
+    m_lastActivity.start();
+    m_lastRecycle.start();
+    // One policy ticker serves both regimes: while the panel is closed it
+    // drives the freeze/discard state machine, while it is open it schedules
+    // renderer-memory maintenance recycles. A 1 Hz tick costs nothing.
     m_idleTimer = new QTimer(this);
     m_idleTimer->setInterval(1000);
     connect(m_idleTimer, &QTimer::timeout, this, &PreviewWidget::idleTick);
+    m_idleTimer->start();
 
     connect(m_web, &QWebEngineView::loadFinished, this, [this](bool ok) {
         if (!ok) {
+            // A failed load must not leave a mid-recycle page hidden; a failed
+            // ordinary load has nothing to render anyway.
+            if (m_recycling) {
+                finalizeRecycle();
+            }
             return;
         }
         m_loaded = true;
@@ -509,6 +555,12 @@ PreviewWidget::PreviewWidget(KTextEditor::MainWindow *mainWindow, KTextEditor::V
         // freezes loaded, hidden pages): apply the closed-panel policy now.
         if (m_panelClosed) {
             m_web->page()->setLifecycleState(QWebEnginePage::LifecycleState::Frozen);
+        }
+        noteActivity();
+        // The fresh page of a maintenance recycle finished rendering: end the
+        // cycle last, so the scroll restore lands on the rendered content.
+        if (m_recycling) {
+            finalizeRecycle();
         }
     });
 
@@ -547,6 +599,58 @@ void PreviewWidget::attachDocument(KTextEditor::Document *doc, KTextEditor::View
                 updateTitle();
             }
         });
+    }
+    // Renderer-memory maintenance at a document switch: when the current
+    // renderer has accumulated enough dead memory, this switch is the moment
+    // to recycle it — the page is discarded (its renderer process exits and
+    // every byte is returned) and the fresh page loads the newly attached
+    // document directly. The user perceives exactly the reload a document
+    // switch already is, so the maintenance is invisible by construction
+    // (see lazyrender.md / the renderer-memory maintenance below).
+    if (m_loaded && doc && !m_panelClosed && m_pendingExportPath.isEmpty() && recycleDue()) {
+        if (qEnvironmentVariableIsSet("KATEXDOWN_DEBUG")) {
+            qDebug() << "[katexdown] document switch doubles as a renderer-memory recycle";
+        }
+        m_url = doc->url();
+        updateTitle();
+        noteActivity();
+        // new document: start at the top. If the recycle cannot start right
+        // now (e.g. a load is still settling), fall through to the normal
+        // document load below — the next switch can recycle instead.
+        if (performMemoryRecycle(false)) {
+            return;
+        }
+    }
+    // Reloadless switch: when the page that is currently loaded was built for
+    // the same document folder (same relative-image base and the same local
+    // file guard) and this text needs no engine the page lacks, re-rendering
+    // in place is enough — a full setHtml navigation would re-execute every
+    // inlined engine for no visible gain and is exactly the churn that makes
+    // a long-lived renderer accumulate memory (see lazyrender.md / the
+    // renderer-memory maintenance below). This is the common "a few markdown
+    // tabs in one project" case; anything that changes the folder, the page
+    // state or the engine set falls back to the full load below.
+    bool canReloadless = false;
+    if (m_loaded && doc && !m_panelClosed && m_pendingExportPath.isEmpty()) {
+        const QUrl url = doc->url();
+        const auto folderOf = [](const QUrl &u) {
+            return u.isLocalFile() ? QFileInfo(u.toLocalFile()).absolutePath() : QString();
+        };
+        if (folderOf(url) == folderOf(m_pageUrl) && !url.isEmpty()) {
+            m_text = doc->text(); // the freshest text decides the engine set
+            canReloadless = (enginesForText(m_text) & (kEngineAll & ~m_pageEngines)) == 0;
+        }
+    }
+    if (canReloadless) {
+        m_url = doc->url();
+        if (qEnvironmentVariableIsSet("KATEXDOWN_DEBUG")) {
+            qDebug() << "[katexdown] reloadless document switch (same folder, same engines)";
+        }
+        m_pendingScrollReset = true;
+        scheduleRender(); // pushes the new text; render() resets the scroll
+        noteActivity();
+        updateTitle();
+        return;
     }
     loadPage(); // refreshes m_url, which updateTitle() reads
     updateTitle();
@@ -676,6 +780,9 @@ void PreviewWidget::loadPage()
     // Inline only the engines this text can use (see enginesForText). If the
     // text later grows into an engine the page lacks, render() rebuilds it.
     m_pageEngines = enginesForText(m_text);
+    m_pageUrl = m_url; // the folder this page will resolve relative paths against
+    noteRenderWork(0, true); // every full load costs the renderer a fixed chunk
+    noteActivity();
     if (qEnvironmentVariableIsSet("KATEXDOWN_DEBUG")) {
         qDebug() << "[katexdown]   built with engines:" << m_pageEngines;
     }
@@ -736,6 +843,8 @@ void PreviewWidget::performExport(const QString &path)
     // Callers (exportToFile, loadFinished after render()) have already pulled
     // the live text into m_text; push it once more so the serialized DOM is
     // guaranteed to match the current buffer.
+    noteRenderWork(m_text.size(), false);
+    noteActivity();
     runJs(QStringLiteral("window.__setMarkdown(%1);").arg(jsLiteral(m_text)));
     // Re-render is synchronous in the page; give the compositor a moment and
     // then serialize the current DOM, styles and all.
@@ -811,6 +920,9 @@ void PreviewWidget::render()
     if (!m_loaded) {
         return;
     }
+    // During a recycle the page is hidden and then discarded (m_loaded false),
+    // so pushes below simply skip until the fresh page loads and re-renders
+    // the current text through the normal pipeline — nothing to cancel here.
     if (m_doc) {
         m_text = m_doc->text();
         m_bufferStale = false; // live content supersedes any close-time snapshot
@@ -826,11 +938,20 @@ void PreviewWidget::render()
         loadPage();
         return;
     }
+    // Every full-document push costs the renderer a chunk proportional to the
+    // text (measured in the renderer-memory maintenance notes); count it now.
+    noteRenderWork(m_text.size(), false);
     runJs(QStringLiteral("window.__setMarkdown(%1);").arg(jsLiteral(m_text)));
+    if (m_pendingScrollReset) {
+        m_pendingScrollReset = false;
+        runJs(QStringLiteral("window.scrollTo(0, 0);"));
+    }
+    noteActivity();
 }
 
 void PreviewWidget::scheduleRender()
 {
+    noteActivity();
     m_debounce->start();
 }
 
@@ -855,59 +976,270 @@ void PreviewWidget::panelClosed(bool releaseWhenIdle)
     m_panelClosed = true;
     m_releaseWhenIdle = releaseWhenIdle;
     m_closedSince.restart();
+    // If a recycle is mid-flight, it must not un-hide or load on its own once
+    // the panel is closed: the Discarded page below belongs to the closed-panel
+    // policy now, and the cycle finalizes without touching it (see the discard
+    // branch of the lifecycle handler and finalizeRecycle).
     // A closed panel does not need a live page. Qt only freezes loaded, hidden
     // pages, and it learns about the hide asynchronously — the request below
     // can be refused while the hide event is still being delivered, so the
     // idle timer retries every second until the freeze sticks (a frozen page
     // keeps its renderer and content and still accepts script pushes, so
-    // toggling the panel back is instant).
-    m_idleTimer->start();
+    // toggling the panel back is instant). The timer also drives the
+    // open-panel renderer-memory maintenance, so it never stops.
     if (m_loaded) {
         m_web->page()->setLifecycleState(QWebEnginePage::LifecycleState::Frozen);
     }
+    noteActivity();
 }
 
 void PreviewWidget::panelOpened()
 {
     m_panelClosed = false;
-    m_idleTimer->stop();
     // Unfreeze (instant for a frozen page); if the page was discarded while
     // closed, Qt reloads it now and the normal load pipeline refreshes the
     // mirrored content.
     if (m_web->page()->lifecycleState() != QWebEnginePage::LifecycleState::Active) {
         m_web->page()->setLifecycleState(QWebEnginePage::LifecycleState::Active);
     }
+    noteActivity();
 }
 
+// One policy tick, every second. While the panel is closed it walks the
+// freeze/discard state machine (a closed preview costs no CPU, and a
+// long-closed LazyKeep page releases its renderer). While the panel is open
+// it runs the renderer-memory maintenance: Chromium never reclaims the dead
+// memory a long-lived renderer accumulates on its own — Qt refuses to freeze
+// or discard a visible page, and the only reliable reclamation is letting the
+// renderer process die — so once the estimated dead memory since the last
+// recycle passes a budget (or a pure-time backstop expires) and the preview
+// has been quiet for a while, the renderer is recycled (performMemoryRecycle).
+// Document switches recycle as part of the switch instead (attachDocument),
+// which the user perceives as the normal reload a switch already is.
 void PreviewWidget::idleTick()
 {
-    if (!m_panelClosed) {
-        m_idleTimer->stop();
-        return;
-    }
-    if (m_web->page()->lifecycleState() == QWebEnginePage::LifecycleState::Discarded) {
-        m_idleTimer->stop(); // already released: nothing left to do while closed
-        return;
-    }
-    if (!m_loaded || !m_pendingExportPath.isEmpty()) {
-        return; // page still loading or an export is owed; try again next tick
-    }
-    const QWebEnginePage::LifecycleState state = m_web->page()->lifecycleState();
-    if (state != QWebEnginePage::LifecycleState::Frozen) {
-        // The freeze requested by panelClosed() may have been refused while Qt
-        // was still delivering the hide event; now that the page is loaded and
-        // hidden it can stick.
-        m_web->page()->setLifecycleState(QWebEnginePage::LifecycleState::Frozen);
-        return;
-    }
-    // Frozen and, in LazyKeep (releaseWhenIdle), closed long enough: release
-    // the renderer entirely. The page comes back automatically (a reload) the
-    // next time the panel opens. Eager stays frozen forever.
-    if (m_releaseWhenIdle && m_closedSince.hasExpired(m_idleDiscardMs)) {
-        if (qEnvironmentVariableIsSet("KATEXDOWN_DEBUG")) {
-            qDebug() << "[katexdown] discarding the page of the long-closed preview";
+    if (m_panelClosed) {
+        if (m_web->page()->lifecycleState() == QWebEnginePage::LifecycleState::Discarded) {
+            return; // already released: nothing left to do while closed
         }
-        m_web->page()->setLifecycleState(QWebEnginePage::LifecycleState::Discarded);
+        if (!m_loaded || !m_pendingExportPath.isEmpty()) {
+            return; // page still loading or an export is owed; try again next tick
+        }
+        const QWebEnginePage::LifecycleState state = m_web->page()->lifecycleState();
+        if (state != QWebEnginePage::LifecycleState::Frozen) {
+            // The freeze requested by panelClosed() may have been refused while Qt
+            // was still delivering the hide event; now that the page is loaded and
+            // hidden it can stick.
+            m_web->page()->setLifecycleState(QWebEnginePage::LifecycleState::Frozen);
+            return;
+        }
+        // Frozen and, in LazyKeep (releaseWhenIdle), closed long enough: release
+        // the renderer entirely. The page comes back automatically (a reload) the
+        // next time the panel opens. Eager stays frozen forever.
+        if (m_releaseWhenIdle && m_closedSince.hasExpired(m_idleDiscardMs)) {
+            if (qEnvironmentVariableIsSet("KATEXDOWN_DEBUG")) {
+                qDebug() << "[katexdown] discarding the page of the long-closed preview";
+            }
+            m_web->page()->setLifecycleState(QWebEnginePage::LifecycleState::Discarded);
+        }
+        return;
+    }
+
+    // Open panel: renderer-memory maintenance.
+    if (m_recycling) {
+        // The discard may have been refused while Qt's visibility flag was
+        // still catching up ("page is visible"); keep trying for a few ticks.
+        // abortRecycle's timer is the backstop that guarantees the preview can
+        // never stay hidden.
+        if (!m_panelClosed && m_web->page()->lifecycleState() == QWebEnginePage::LifecycleState::Active
+            && ++m_recycleDiscardTries <= 10) {
+            m_web->page()->setVisible(false);
+            m_web->page()->setLifecycleState(QWebEnginePage::LifecycleState::Discarded);
+        }
+        return;
+    }
+    if (!m_loaded) {
+        return;
+    }
+    if (m_web->page()->lifecycleState() != QWebEnginePage::LifecycleState::Active) {
+        return; // e.g. a load still settling
+    }
+    if (!m_web->isVisible()) {
+        return; // only recycle a page the user can actually see
+    }
+    if (!recycleDue() || !recycleIdle() || webHasFocus()) {
+        return;
+    }
+    performMemoryRecycle(true); // same document: keep the scroll position
+}
+
+// Run one renderer-memory maintenance cycle (see the idleTick comment for why
+// this is the reclaim primitive). The page is told it is hidden, discarded —
+// its renderer process exits and every byte it ever held is returned — and a
+// fresh page is then loaded from the mirrored document state, so content
+// returns through the normal load pipeline. restoreScroll keeps the previous
+// scroll position (same-document idle recycle); document-switch recycles pass
+// false (a new document starts at the top). Public so tests can drive it
+// directly; the policy ticker applies the quiet/focus/visibility gates first.
+bool PreviewWidget::performMemoryRecycle(bool restoreScroll)
+{
+    if (!m_loaded || m_recycling || m_panelClosed || !m_pendingExportPath.isEmpty()
+        || m_web->page()->lifecycleState() != QWebEnginePage::LifecycleState::Active) {
+        return false;
+    }
+    if (qEnvironmentVariableIsSet("KATEXDOWN_DEBUG")) {
+        qDebug() << "[katexdown] renderer-memory recycle: discarding the page to reclaim renderer memory";
+    }
+    m_recycling = true;
+    m_recycleDiscardTries = 0;
+    if (restoreScroll) {
+        // window.scrollY answers asynchronously; start the cycle once we have it.
+        m_web->page()->runJavaScript(QStringLiteral("window.scrollY"), [this](const QVariant &v) {
+            startRecycleAfterScrollQuery(v.toDouble());
+        });
+    } else {
+        startRecycleAfterScrollQuery(-1);
+    }
+    return true;
+}
+
+void PreviewWidget::startRecycleAfterScrollQuery(double scrollY)
+{
+    if (!m_recycling) {
+        return; // aborted while the query was in flight
+    }
+    m_recycleScrollY = scrollY;
+    beginRecycle();
+}
+
+void PreviewWidget::beginRecycle()
+{
+    if (m_panelClosed) {
+        // The panel closed while the scroll query was in flight: the recycle
+        // must not fight the closed-panel policy (Eager freezes closed pages
+        // forever; LazyKeep decides itself when to release one).
+        m_recycling = false;
+        m_recycleScrollY = -1;
+        m_recycleTimer->stop();
+        noteActivity();
+        return;
+    }
+    // Qt refuses to discard a page it considers visible ("page is visible");
+    // telling the page it is hidden is what makes the lifecycle move legal.
+    // The widget stays on screen; QtWebEngine keeps the last composited frame
+    // while the page is hidden, so a same-document recycle shows a static page
+    // for a few hundred ms and then the identical content again. If the
+    // discard is refused anyway (Qt's visibility flag can lag), idleTick
+    // retries while m_recycling is set, and the safety timer aborts the cycle
+    // so the preview can never stay hidden.
+    m_web->page()->setVisible(false);
+    m_web->page()->setLifecycleState(QWebEnginePage::LifecycleState::Discarded);
+    m_recycleTimer->start(5000);
+}
+
+// End of a recycle cycle: the fresh page finished loading (or the cycle was
+// abandoned). Un-hide the page, restore the scroll for a same-document
+// recycle, and reset the maintenance state. If the panel closed mid-cycle,
+// the page belongs to the closed-panel policy and stays hidden/discarded.
+void PreviewWidget::finalizeRecycle()
+{
+    if (!m_recycling) {
+        return;
+    }
+    m_recycleTimer->stop();
+    m_recycling = false;
+    m_recycleDiscardTries = 0;
+    if (!m_panelClosed) {
+        m_web->page()->setVisible(true);
+        if (m_recycleScrollY >= 0) {
+            runJs(QStringLiteral("window.scrollTo(0, %1);").arg(m_recycleScrollY, 0, 'f', 1));
+        }
+    }
+    m_recycleScrollY = -1;
+    noteActivity();
+}
+
+// The safety net: a discard that never stuck, or a fresh load that never
+// finished, must not leave the preview hidden. Un-hide and give up on the
+// cycle; the next budget crossing will try again.
+void PreviewWidget::abortRecycle()
+{
+    if (!m_recycling) {
+        return;
+    }
+    m_recycleTimer->stop();
+    m_recycling = false;
+    m_recycleScrollY = -1;
+    if (!m_panelClosed) {
+        m_web->page()->setVisible(true);
+    }
+    noteActivity();
+}
+
+// Renderer-memory estimate (see the maintenance design in lazyrender.md): a
+// full page load costs the renderer a fixed, content-independent chunk
+// (re-executing every inlined engine), and every full-document markdown push
+// costs a chunk proportional to the text — measured at roughly 0.5-0.9 kB of
+// dead renderer memory per byte of markdown in the test environment. The
+// estimate is deliberately conservative (over- rather than under-counts) so
+// memory stays bounded even where the real ratio is higher than measured.
+void PreviewWidget::noteRenderWork(qint64 textBytes, bool navigation)
+{
+    // 4 MB per full load, ~0.5 kB leaked per byte of pushed markdown.
+    constexpr qint64 kFixedPerLoad = 4ll * 1024 * 1024;
+    constexpr qint64 kLeakFactor = 512;
+    if (navigation) {
+        m_memEstimate += kFixedPerLoad;
+    }
+    if (textBytes > 0) {
+        m_memEstimate += textBytes * kLeakFactor;
+    }
+}
+
+void PreviewWidget::noteActivity()
+{
+    m_lastActivity.restart();
+}
+
+bool PreviewWidget::recycleDue() const
+{
+    return m_memEstimate >= m_memBudgetBytes || m_lastRecycle.elapsed() >= m_memMaxAgeMs;
+}
+
+bool PreviewWidget::recycleIdle() const
+{
+    return !m_debounce->isActive() && m_pendingExportPath.isEmpty() && m_lastActivity.elapsed() >= m_memIdleMs;
+}
+
+bool PreviewWidget::webHasFocus() const
+{
+    if (!m_web) {
+        return false;
+    }
+    if (m_web->hasFocus()) {
+        return true;
+    }
+    QWidget *proxy = m_web->focusProxy();
+    return proxy && proxy->hasFocus();
+}
+
+void PreviewWidget::readMemTuning()
+{
+    const int budgetMb = qEnvironmentVariableIntValue("KATEXDOWN_MEM_BUDGET_MB");
+    if (budgetMb > 0) {
+        m_memBudgetBytes = qint64(budgetMb) * 1024 * 1024;
+    }
+    const int idleMs = qEnvironmentVariableIntValue("KATEXDOWN_MEM_IDLE_MS");
+    if (idleMs > 0) {
+        m_memIdleMs = idleMs;
+    }
+    const int maxAgeMs = qEnvironmentVariableIntValue("KATEXDOWN_MEM_MAX_AGE_MS");
+    if (maxAgeMs > 0) {
+        m_memMaxAgeMs = maxAgeMs;
+    }
+    if (qEnvironmentVariableIsSet("KATEXDOWN_MEM_OFF")) {
+        m_memBudgetBytes = std::numeric_limits<qint64>::max();
+        m_memMaxAgeMs = std::numeric_limits<int>::max();
     }
 }
 
@@ -970,7 +1302,30 @@ bool PreviewWidget::eventFilter(QObject *obj, QEvent *event)
         if (event->type() == QEvent::ChildAdded || event->type() == QEvent::ChildPolished) {
             installInputFilter();
         }
+        if (event->type() == QEvent::Resize) {
+            noteActivity();
+        }
         return QWidget::eventFilter(obj, event);
+    }
+
+    // Anything the user does to the page — keys, clicks, scrolling, focus —
+    // is activity: it defers a maintenance recycle (see recycleIdle). A
+    // recycle already mid-flight is safe to let finish — edits during it
+    // simply wait for the fresh page's load pipeline, which re-renders the
+    // latest text.
+    switch (event->type()) {
+    case QEvent::KeyPress:
+    case QEvent::KeyRelease:
+    case QEvent::MouseButtonPress:
+    case QEvent::MouseButtonRelease:
+    case QEvent::MouseButtonDblClick:
+    case QEvent::Wheel:
+    case QEvent::TouchBegin:
+    case QEvent::FocusIn:
+        noteActivity();
+        break;
+    default:
+        break;
     }
 
     switch (event->type()) {

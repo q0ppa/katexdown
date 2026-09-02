@@ -1,14 +1,15 @@
 # lazyrender — preview loading & renderer memory
 
 One design idea, applied at three scales: **nothing should be loaded, decoded,
-or alive that the user is not looking at.** This doc covers the three levers
-the `lazyrender` work added — page lifetime, per-document engine gating, and
-the image decode policy — their cross-cutting invariants, and the two
+or alive that the user is not looking at.** This doc covers the levers the
+`lazyrender` work added — page lifetime, per-document engine gating, the image
+decode policy, and the renderer-memory maintenance that keeps a long-session
+renderer from growing without bound — their cross-cutting invariants, and the
 regressions they caused that must not happen again.
 
 ## Goal / problem
 
-The preview is a QWebEngineView with its own Chromium renderer process. Three
+The preview is a QWebEngineView with its own Chromium renderer process. Four
 things scale badly with naive "render everything, keep everything":
 
 1. **The process itself** — an idle renderer resident in a closed panel.
@@ -18,6 +19,14 @@ things scale badly with naive "render everything, keep everything":
 3. **Decoded images** — a decoded photo is width × height × 4 bytes in the
    renderer. A document with hundreds of images decodes them all eagerly if
    nothing stops it.
+4. **The long-lived renderer's dead memory** — a Chromium renderer never gives
+   memory back to the OS on its own, and in QtWebEngine a *visible* page can
+   neither be frozen nor discarded. Every full re-render of a large document
+   (or every document switch) leaves a chunk of dead memory behind — measured
+   at roughly 0.5-0.9 kB per byte of markdown pushed, per generation, with no
+   natural plateau (a text-only switching session grew to 2.2 GB in testing
+   with the panel open the whole time). Without maintenance, "leave it open"
+   is a slow leak to gigabytes.
 
 ## Design
 
@@ -128,6 +137,67 @@ real src, decoded  ──leave keep zone──▶  parked (src = 1x1 placeholder
   stripped, so `Export HTML…` always writes plain, eager images (see Pitfalls
   for why the live page must not be serialized directly).
 
+
+### 4. Renderer-memory maintenance (`previewwidget.cpp` idleTick / performMemoryRecycle)
+
+The levers above decide what enters a renderer. This one bounds what a
+long-lived renderer *retains* — because nothing inside Chromium gives it back.
+Measurements that shaped the design (offscreen test environment, text-only
+documents):
+
+- A renderer that stays alive never returns dead memory: switching among three
+  ~100 kB documents grew one renderer by ~70 MB **per switch**, linearly, to
+  2.2 GB in 30 switches, and 48 full re-renders of one document grew it to
+  2.75 GB with no plateau and no self-triggered GC. (Pure JS allocation churn
+  barely leaks — the growth comes from full-document re-rendering.)
+- QtWebEngine refuses to freeze or discard a page it considers **visible**
+  ("page is visible"), and a frozen page only runs Chromium's memory purge
+  when it was *never shown* — so neither freeze nor discard can reclaim an
+  open preview's renderer.
+- Discard is the reliable primitive: when the page is told it is hidden
+  (`QWebEnginePage::setVisible(false)`), Qt allows `Discarded`, the renderer
+  process **exits and returns every byte**, and a subsequent load starts a
+  fresh process at the ~180 MB baseline.
+
+The maintenance therefore **recycles the renderer** (lets it die and loads a
+fresh page from the mirrored document state) instead of trying to purge it.
+Two trigger points, both invisible by construction:
+
+- **At a document switch** (`attachDocument`): a switch already reloads the
+  page, so replacing that reload with discard + fresh load costs the user
+  nothing extra — the switch just lands on a clean renderer. This is what
+  bounds tab-switching sessions.
+- **At an idle moment on the same document** (`idleTick`, once the estimated
+  dead memory passes the budget and the page has been quiet for a while, not
+  focused, visible): the page is recycled in place with the scroll position
+  restored after the fresh load, so a paused reader sees nothing change.
+
+The trigger is an **estimate**, not an RSS measurement (portable): every full
+page load adds a fixed cost (re-executing the inlined engines) and every
+full-document markdown push adds `text size × factor`, with the factor
+calibrated from the measurements above (defaults in `readMemTuning()`;
+tunable per process via `KATEXDOWN_MEM_BUDGET_MB`, `KATEXDOWN_MEM_IDLE_MS`,
+`KATEXDOWN_MEM_MAX_AGE_MS`, `KATEXDOWN_MEM_OFF=1`). The estimate over- rather
+than under-counts, so real memory stays under the budget even where the real
+leak ratio is higher than measured. A discard (or a closed-panel freeze, which
+*is* a purge) resets the estimate — that is the "since the last purge" book-
+keeping. A 5 s safety timer aborts any recycle that does not complete, so the
+preview can never stay hidden.
+
+### 5. Reloadless document switches (`attachDocument` fast path)
+
+Every document switch used to be a full `setHtml` navigation — re-executing
+every inlined engine and paying the fixed per-load renderer cost even for a
+plain text swap. When the incoming document lives in the **same folder as the
+page that is currently loaded** (same relative-image base, same local-file
+guard) and needs no engine the page lacks, the switch now just pushes the text
+(`render()` in place) and resets the scroll. Same-folder tab switching — the
+common "a few markdown files in one project" case — is therefore much cheaper
+than before *and* dirties the renderer less between recycles. Any folder or
+engine change, a loading page, or a closed panel falls back to the full load.
+A doc that outgrows the page's engine set still triggers the one-time rebuild
+(Invariant 4).
+
 ## Invariants (rules a change must not break)
 
 1. **Parking never moves the layout.** A parked image's box is byte-identical
@@ -151,6 +221,27 @@ real src, decoded  ──leave keep zone──▶  parked (src = 1x1 placeholder
 6. **The closed panel costs no CPU.** Kept modes freeze on close; only a
    frozen, long-closed page may be discarded. Opening returns the page to
    Active and lets the load pipeline refresh it.
+7. **Reclaiming an open preview's renderer means letting the process die.** Qt
+   refuses `Frozen`/`Discarded` on a visible page; freeze purges only
+   never-shown pages. The maintenance recycle therefore hides the page
+   (`setVisible(false)`), discards it, and loads a fresh page from the
+   mirrored document state — every recycle is a full discard-and-reload, and
+   nothing else may be substituted for it.
+8. **A recycle is a reload, so it must obey the load pipeline invariants.** It
+   only starts when the page is loaded/active and the panel is open; the fresh
+   load clears and re-sets `m_loaded` through the normal `loadFinished`
+   pipeline, which re-applies theme, image mode, content and outline from the
+   mirrored state (`m_text`/`m_doc`). `render()` and friends never push into a
+   page that is mid-recycle; they wait for the pipeline like after any load.
+9. **A recycle is only ever user-invisible.** It happens either as part of a
+   document switch (which reloads anyway) or after the preview has been quiet
+   (no text change, input or pending work) for the idle window, is visible,
+   and is not focused; the same-document variant restores the scroll position
+   after the fresh load. A safety timer aborts any recycle that gets stuck, so
+   the preview can never remain hidden.
+10. **A page only ever re-renders a same-folder switch in place** (Section 5)
+    when it is loaded, the panel is open, nothing is pending, and the new text
+    needs no engine the page lacks; any other switch is a full load.
 
 ## Pitfalls (each already cost a debugging session)
 
@@ -192,13 +283,46 @@ real src, decoded  ──leave keep zone──▶  parked (src = 1x1 placeholder
   the freshest text (document switches can arrive before the first render),
   which is why `render()`/`loadPage()`/`exportToFile()` refresh `m_text` from
   the document before scanning.
+- **"The renderer never returns memory" is the default, not a bug report.**
+  QtWebEngine keeps a long-lived renderer's dead memory forever (measured:
+  tens of MB per full re-render of a large document, unbounded growth, no
+  self-limiting GC). `performance.memory` is useless for tracking this — its
+  numbers only update when a GC runs, which is exactly what never happens.
+  Renderer RSS (the process' resident set) is the only honest signal.
+- **Visible pages cannot be frozen or discarded, and "hidden" is Qt's call.**
+  `setLifecycleState(Frozen/Discarded)` on a shown page logs "page is visible"
+  and does nothing. Telling the *page* it is hidden
+  (`QWebEnginePage::setVisible(false)`, which leaves the widget on screen
+  showing its last frame) is what makes the discard legal. Early prototypes
+  froze unshown widgets and "proved" freeze purges memory — that purge only
+  runs for pages that were never shown, so it must not be relied on for an
+  open panel.
+- **A discard that is part of a recycle must load the mirrored document, not
+  wait for the committed URL to reload.** Loading the old document first and
+  then replacing it doubles the work and can apply stale engines/guard roots.
+  `setHtml` on a discarded page restores it and navigates straight to the new
+  content (verified empirically), which is what the recycle's discard handler
+  does.
+- **An idle recycle must not run while the user is touching the preview.** The
+  quiet gate watches text changes, input events, focus and pending work; a
+  same-document recycle restores the scroll *after* the fresh render. Without
+  the scroll restore a reload would visibly jump a reading user to the top.
+- **The recycle estimate must reset when the memory is actually gone.** A
+  discard (process death) and a closed-panel freeze (which *does* purge)
+  both reset the estimate; otherwise the budget would fire immediately after
+  the very recycle that just cleaned the renderer.
 
 ## Test seams
 
 - Env hooks (named like the existing `KATEXDOWN_DEBUG`):
   `KATEXDOWN_IDLE_DISCARD_MS` shortens the LazyKeep discard delay;
   `KATEXDOWN_DATA_DIR` points at a fake asset dir (used to fake KaTeX assets
-  so engine-gating tests need no downloaded data).
+  so engine-gating tests need no downloaded data);
+  `KATEXDOWN_MEM_BUDGET_MB`/`KATEXDOWN_MEM_IDLE_MS`/`KATEXDOWN_MEM_MAX_AGE_MS`
+  shorten the recycle budget and quiet window, and `KATEXDOWN_MEM_OFF=1`
+  disables the policy ticker so tests can drive `performMemoryRecycle()`
+  directly. RSS is measured in tests by walking `/proc` for the test process'
+  QtWebEngine descendants (Linux; the RSS tests skip elsewhere).
 - Which test pins which invariant:
   - `followmodetest::keptModesFreezeAndReleaseWhileClosed` — lifecycle state
     machine (Active → Frozen → Discarded → reload → Active; Eager never
@@ -213,6 +337,17 @@ real src, decoded  ──leave keep zone──▶  parked (src = 1x1 placeholder
   - `previewlifecycletest::loadsImageBesideTheDocument` — relative-image guard
     via a 2×1 PNG whose natural width distinguishes a real decode (2) from a
     failed (0) or placeholder (1) state.
+  - `rendermemorytest::memoryStaysBoundedAcrossDocumentSwitches` — Invariants
+    7-9: switching among three large documents with a shortened budget keeps
+    total engine RSS within a couple of hundred MB of the baseline (an
+    unrecycled run grows past a gigabyte), a fresh renderer process appears,
+    and the preview stays functional.
+  - `rendermemorytest::maintenanceRecycleFreesMemoryAndKeepsThePage` —
+    Invariant 9: a same-document recycle reclaims hundreds of MB, keeps the
+    content, and restores the exact scroll position.
+  - `rendermemorytest::imagesSurviveMaintenanceRecycle` — a relative image
+    still decodes after a recycle (the fresh load re-applies the local-file
+    guard) with no stranded failure state.
 - Tests run headless: `QT_QPA_PLATFORM=offscreen`, `--disable-gpu
   --no-sandbox`, and they show + resize the preview because IntersectionObserver
   callbacks are driven by compositor frames.
@@ -227,3 +362,9 @@ real src, decoded  ──leave keep zone──▶  parked (src = 1x1 placeholder
 - Image policy: `data/js/preview.js` (image section: `armImages`, `swapOut`,
   `swapIn`, `recordDims`, `onImgLoad/onImgError`, `__setImageMode`,
   `__serializedHtml`), `data/css/base.css` (the `data-pv-imgmode` height rule).
+- Renderer-memory maintenance: `src/previewwidget.{h,cpp}` (`idleTick` open-
+  panel branch, `performMemoryRecycle`/`beginRecycle`/`finalizeRecycle`/
+  `abortRecycle`, the lifecycle-state handler's discard/frozen branches,
+  `noteRenderWork`/`noteActivity`/`recycleDue`/`recycleIdle`,
+  `readMemTuning`, the `attachDocument` recycle + same-folder fast path);
+  tests in `tests/rendermemorytest.cpp`.

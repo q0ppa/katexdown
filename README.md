@@ -169,6 +169,22 @@ actually open a preview. Toggling through kate's own "Show Preview" menu entry
 or the sidebar button follows the same rules. Note: after a restart the panel
 opens closed in the lazy modes (that is the point — nothing loaded until asked).
 
+A rendered page never frees its renderer's memory on its own: the Chromium
+engine behind the web view only gives memory back when its process ends, and
+Qt will not let a *visible* page be frozen or discarded. So while a preview
+stays open through a long session, Katexdown **recycles the renderer** for it:
+it estimates the dead memory a long-lived renderer accumulates (every full
+re-render costs it a chunk proportional to the document, with no natural
+plateau — measured in the hundreds of MB for large documents) and, once that
+passes a budget, restarts the renderer at a moment you would not notice: a
+document switch already reloads the page, and when you simply pause reading or
+typing, the page is recreated in place with your scroll position kept (see
+`design/lazyrender.md`). Between recycles, switching between documents that
+live in the same folder re-renders in place instead of reloading the whole
+page, which keeps that churn small in the first place. The closed-panel rules
+above remain the biggest lever: a preview left closed releases its renderer
+entirely.
+
 A preview page is also trimmed to the document at hand: KaTeX, the syntax
 highlighter and the YAML front-matter parser are only loaded when the current
 document actually uses math, fenced code blocks or front matter (a page

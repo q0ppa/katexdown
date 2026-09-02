@@ -37,4 +37,4 @@ invariants a change must not break, and which pitfalls already cost us.
 
 | Doc | Topic |
 |-----|-------|
-| [lazyrender.md](lazyrender.md) | Preview loading & renderer memory: page lifetime (freeze/discard), per-document engine gating, image decode modes and the parking machinery |
+| [lazyrender.md](lazyrender.md) | Preview loading & renderer memory: page lifetime (freeze/discard), per-document engine gating, image decode modes and the parking machinery, plus the renderer-memory maintenance (recycle) that bounds a long-session renderer |
