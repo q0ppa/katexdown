@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QList>
 #include <QObject>
 
 /**
@@ -50,6 +51,12 @@ public:
     {
         return m_customCssFiles;
     }
+    // Heading levels the preview's floating section outline lists (1..6,
+    // ascending). Which levels count is configurable; the default is H1-H5.
+    QList<int> tocLevels() const
+    {
+        return m_tocLevels;
+    }
 
     void setMode(Mode mode);
     void setGhVariant(GhVariant variant);
@@ -57,6 +64,7 @@ public:
     void setUseGithubCss(bool enabled);
     void setLoadingMode(LoadingMode mode);
     void setCustomCssFiles(const QStringList &files);
+    void setTocLevels(const QList<int> &levels);
 
     void load();
     void save() const;
@@ -78,4 +86,6 @@ private:
     // listed order (later files win). Relative paths resolve against the
     // Katexdown data dir (see katexdownpaths.h).
     QStringList m_customCssFiles;
+    // Heading levels (1..6) recognized by the floating section outline.
+    QList<int> m_tocLevels = {1, 2, 3, 4, 5};
 };

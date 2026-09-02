@@ -95,6 +95,27 @@ ConfigPage::ConfigPage(QWidget *parent)
     cssHint->setEnabled(false);
     form->addRow(QString(), cssHint);
 
+    // Floating section outline: which heading levels it lists (H1-H5 default).
+    auto *tocRowHost = new QWidget(this);
+    auto *tocRow = new QHBoxLayout(tocRowHost);
+    tocRow->setContentsMargins(0, 0, 0, 0);
+    tocRow->setSpacing(6);
+    for (int level = 1; level <= 6; ++level) {
+        auto *box = new QCheckBox(QStringLiteral("H%1").arg(level), tocRowHost);
+        box->setToolTip(i18n("List level %1 headings in the preview's section outline", level));
+        m_tocLevel[level - 1] = box;
+        tocRow->addWidget(box);
+    }
+    form->addRow(i18n("Section outline:"), tocRowHost);
+    auto *tocHint = new QLabel(
+        i18n("A floating button at the bottom right of the preview opens a list of the document's "
+             "sections; click an entry to jump straight to that heading. Only the heading levels "
+             "checked here are listed (H1-H5 by default). Unchecking all of them hides the button."),
+        this);
+    tocHint->setWordWrap(true);
+    tocHint->setEnabled(false);
+    form->addRow(QString(), tocHint);
+
     auto *hint = new QLabel(
         i18n("\"GitHub\" uses GitHub's own colors. \"Match editor / system theme\" recolors the "
              "same layout from the active editor theme, so the preview blends with the rest of Kate."),
@@ -189,6 +210,9 @@ ConfigPage::ConfigPage(QWidget *parent)
     connect(m_loading, &QComboBox::currentIndexChanged, this, [this]() {
         Q_EMIT changed();
     });
+    for (int level = 1; level <= 6; ++level) {
+        connect(m_tocLevel[level - 1], &QCheckBox::toggled, this, [this]() { Q_EMIT changed(); });
+    }
     connect(m_checkButton, &QPushButton::clicked, this, &ConfigPage::checkForUpdates);
 
     connect(cssAdd, &QPushButton::clicked, this, &ConfigPage::addCssFile);
@@ -307,6 +331,13 @@ void ConfigPage::apply()
     s->setLoadRemoteMedia(m_remoteMedia->isChecked());
     s->setUseGithubCss(m_githubCss->isChecked());
     s->setLoadingMode(static_cast<Settings::LoadingMode>(m_loading->currentData().toInt()));
+    QList<int> levels;
+    for (int level = 1; level <= 6; ++level) {
+        if (m_tocLevel[level - 1]->isChecked()) {
+            levels.append(level);
+        }
+    }
+    s->setTocLevels(levels);
     QStringList css;
     for (int i = 0; i < m_cssList->count(); ++i) {
         css << m_cssList->item(i)->text();
@@ -327,6 +358,10 @@ void ConfigPage::reset()
     for (const QString &file : css) {
         m_cssList->addItem(file);
     }
+    const QList<int> levels = s->tocLevels();
+    for (int level = 1; level <= 6; ++level) {
+        m_tocLevel[level - 1]->setChecked(levels.contains(level));
+    }
     syncEnabled();
 }
 
@@ -338,5 +373,8 @@ void ConfigPage::defaults()
     m_githubCss->setChecked(true);
     m_loading->setCurrentIndex(m_loading->findData(Settings::LazyKeep));
     m_cssList->clear();
+    for (int level = 1; level <= 6; ++level) {
+        m_tocLevel[level - 1]->setChecked(level <= 5); // H1-H5 default, H6 off
+    }
     syncEnabled();
 }

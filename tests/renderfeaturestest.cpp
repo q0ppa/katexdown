@@ -77,6 +77,19 @@ bool waitForPageText(PreviewWidget *preview, QLatin1String needle)
     }
     return false;
 }
+
+// Poll a JS expression until it evaluates to the expected string.
+bool waitForCond(PreviewWidget *preview, const QString &code, const QString &expected)
+{
+    QDeadlineTimer deadline(20000);
+    while (!deadline.hasExpired()) {
+        if (evalJs(preview, code) == expected) {
+            return true;
+        }
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+    }
+    return false;
+}
 } // namespace
 
 class RenderFeaturesTest : public QObject
@@ -88,6 +101,7 @@ private Q_SLOTS:
     void githubCssCanBeDisabled();
     void exportsStandaloneHtml();
     void relativeCssResolvesAgainstDataDir();
+    void outlineListsConfiguredHeadings();
 
 private:
     KTextEditor::Document *openDocument(const QString &text);
@@ -234,6 +248,73 @@ void RenderFeaturesTest::relativeCssResolvesAgainstDataDir()
     QCOMPARE(maxWidth, QStringLiteral("333px"));
 
     delete doc;
+}
+
+// The floating section-outline control lists exactly the heading levels the
+// settings select (default H1-H5), assigns anchor ids, and clicking an entry
+// jumps to (and flashes) that heading.
+void RenderFeaturesTest::outlineListsConfiguredHeadings()
+{
+    QVERIFY(m_dir.isValid());
+    Settings::self()->setTocLevels({1, 2, 3});
+    KTextEditor::Document *doc = openDocument(QStringLiteral(
+        "# Intro\n\nsome intro text.\n\n"
+        "## Details\n\nmore text.\n\n"
+        "### Deep dive\n\ndeeper text.\n\n"
+        "#### Skipped\n\nlevel four is off.\n"));
+    auto preview = makePreview(doc);
+    QVERIFY(waitForPageText(preview.get(), QLatin1String("some intro text")));
+
+    // The control appears only once the document has listable headings.
+    QVERIFY(waitForCond(preview.get(),
+                        QStringLiteral("var b = document.getElementById('kdx-outline-btn'); b !== null && getComputedStyle(b).display !== 'none'"),
+                        QStringLiteral("true")));
+    // H1-H3 are listed with their levels, in document order.
+    QVERIFY(waitForCond(preview.get(),
+                        QStringLiteral("document.querySelectorAll('#kdx-outline-list .kdx-outline-item').length"),
+                        QStringLiteral("3")));
+    QCOMPARE(evalJs(preview.get(), QStringLiteral("Array.prototype.map.call(document.querySelectorAll('#kdx-outline-list .kdx-outline-item'), function (li) { return li.getAttribute('data-level'); }).join(',')")),
+             QStringLiteral("1,2,3"));
+    const QString titles = evalJs(preview.get(),
+                                  QStringLiteral("Array.prototype.map.call(document.querySelectorAll('#kdx-outline-list .kdx-outline-text'), function (s) { return s.textContent; }).join('|')"));
+    QVERIFY2(titles.contains(QLatin1String("Intro")) && titles.contains(QLatin1String("Deep dive")) && !titles.contains(QLatin1String("Skipped")),
+             qPrintable(QStringLiteral("unexpected outline entries: %1").arg(titles)));
+
+    // Headings get GitHub-style anchor ids ("Intro" -> "intro").
+    QCOMPARE(evalJs(preview.get(), QStringLiteral("document.getElementById('intro') !== null && document.getElementById('intro').tagName === 'H1'")),
+             QStringLiteral("true"));
+
+    // Clicking the first entry closes the panel and flashes the heading.
+    QCOMPARE(evalJs(preview.get(),
+                    QStringLiteral("document.querySelector('#kdx-outline-list .kdx-outline-item').click(); "
+                                   "document.querySelector('#content h1').classList.contains('kdx-outline-jumped') && "
+                                   "document.getElementById('kdx-outline-panel').hidden")),
+             QStringLiteral("true"));
+    delete doc;
+
+    // Default levels H1-H5: an H6 drops out of the list.
+    Settings::self()->setTocLevels({1, 2, 3, 4, 5});
+    KTextEditor::Document *docAll = openDocument(QStringLiteral("# A\n\n## B\n\n### C\n\n#### D\n\n##### E\n\n###### F\n"));
+    auto previewAll = makePreview(docAll);
+    QVERIFY(waitForPageText(previewAll.get(), QLatin1String("F")));
+    QVERIFY(waitForCond(previewAll.get(),
+                        QStringLiteral("document.querySelectorAll('#kdx-outline-list .kdx-outline-item').length"),
+                        QStringLiteral("5")));
+    QVERIFY(!evalJs(previewAll.get(), QStringLiteral("Array.prototype.map.call(document.querySelectorAll('#kdx-outline-list .kdx-outline-item'), function (li) { return li.getAttribute('data-level'); }).join(',')"))
+                 .contains(QLatin1String("6")));
+    delete docAll;
+
+    // No enabled levels: the button stays hidden.
+    Settings::self()->setTocLevels({});
+    KTextEditor::Document *docNone = openDocument(QStringLiteral("# Lone\n\nsome text.\n"));
+    auto previewNone = makePreview(docNone);
+    QVERIFY(waitForPageText(previewNone.get(), QLatin1String("some text")));
+    QVERIFY(waitForCond(previewNone.get(),
+                        QStringLiteral("var b = document.getElementById('kdx-outline-btn'); b !== null && getComputedStyle(b).display === 'none' && document.querySelectorAll('#kdx-outline-list .kdx-outline-item').length === 0"),
+                        QStringLiteral("true")));
+    delete docNone;
+
+    Settings::self()->setTocLevels({1, 2, 3, 4, 5}); // leave the default for later tests
 }
 
 QTEST_MAIN(RenderFeaturesTest)

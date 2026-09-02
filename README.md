@@ -146,6 +146,10 @@ the panel. The panel's visibility is remembered across sessions; kate also
 registers its own "Show Preview" toggle in the View menu. The Tools menu adds an
 "Export HTML…" entry for saving the current preview as a standalone .html file.
 
+A small round button pinned to the bottom-right corner of the preview opens the
+document's **section outline**: click any entry to jump straight to that
+heading. Which heading levels it lists is configurable (H1–H5 by default).
+
 ## Loading & memory
 
 The preview is a web view with its own renderer process — that is what costs
@@ -219,6 +223,7 @@ Settings -> Configure Kate -> (Plugins -> enable `Katdown`) -> Katdown.
 | Style | GitHub / Match editor or system theme | GitHub uses GitHub's palette. Match recolors the same layout from your active editor theme. |
 | GitHub variant | Auto / Light / Dark | Which GitHub palette to use. Auto follows whether your system is light or dark. Only applies in GitHub style. |
 | Load media previews from remote URLs | On / Off (default) | When on, images referencing `http(s)` URLs are fetched and rendered. When off (the default), the preview loads no remote resources and works fully offline. Images with paths relative to the document always load regardless of this setting. |
+| Section outline | H1–H6 checkboxes | Which heading levels the floating outline button in the preview lists; click an entry to jump to that section. H1–H5 are on by default; unchecking all hides the button. |
 | Custom stylesheets | list | Files appended after the built-in style, in listed order. Relative paths resolve against the Katdown data dir. |
 
 Change the shortcut under Settings, then Configure Keyboard Shortcuts, search for Katdown.

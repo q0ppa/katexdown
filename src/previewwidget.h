@@ -71,6 +71,7 @@ private Q_SLOTS:
     void scheduleRender();
     void onDocumentUrlChanged();
     void snapshotSource();
+    void applyOutlineSettings();
 
 private:
     void updateTitle();

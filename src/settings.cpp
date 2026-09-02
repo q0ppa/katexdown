@@ -1,11 +1,36 @@
 #include "settings.h"
 
+#include <algorithm>
+
 #include <KConfigGroup>
 #include <KSharedConfig>
 
 static QString groupName()
 {
     return QStringLiteral("Katexdown");
+}
+
+// Heading levels recognized by the floating section outline (H1-H5 by default).
+static QStringList defaultTocLevels()
+{
+    return QStringList{QStringLiteral("1"), QStringLiteral("2"), QStringLiteral("3"), QStringLiteral("4"), QStringLiteral("5")};
+}
+
+// Sanitize a stored level list: drop anything outside 1..6 and duplicates,
+// keep the order. An empty (or all-invalid) stored list stays empty, which is
+// the "outline off" state and must survive a save/load round-trip.
+static QList<int> sanitizedLevels(const QStringList &raw)
+{
+    QList<int> levels;
+    for (const QString &v : raw) {
+        bool ok = false;
+        const int level = v.toInt(&ok);
+        if (ok && level >= 1 && level <= 6 && !levels.contains(level)) {
+            levels.append(level);
+        }
+    }
+    std::sort(levels.begin(), levels.end());
+    return levels;
 }
 
 Settings::Settings(QObject *parent)
@@ -38,6 +63,9 @@ void Settings::load()
     m_useGithubCss = cfg.readEntry("GithubCss", true);
     m_loadingMode = static_cast<Settings::LoadingMode>(cfg.readEntry("LoadingMode", int(LazyKeep)));
     m_customCssFiles = cfg.readEntry("CustomCssFiles", QStringList());
+    // Missing key -> defaultTocLevels(); an explicitly empty list means "no
+    // levels, outline off".
+    m_tocLevels = sanitizedLevels(cfg.readEntry("TocLevels", defaultTocLevels()));
 }
 
 void Settings::save() const
@@ -50,6 +78,11 @@ void Settings::save() const
     cfg.writeEntry("GithubCss", m_useGithubCss);
     cfg.writeEntry("LoadingMode", int(m_loadingMode));
     cfg.writeEntry("CustomCssFiles", m_customCssFiles);
+    QStringList levels;
+    for (int level : m_tocLevels) {
+        levels << QString::number(level);
+    }
+    cfg.writeEntry("TocLevels", levels);
     cfg.sync();
 }
 
@@ -109,6 +142,23 @@ void Settings::setCustomCssFiles(const QStringList &files)
         return;
     }
     m_customCssFiles = files;
+    save();
+    Q_EMIT changed();
+}
+
+void Settings::setTocLevels(const QList<int> &levels)
+{
+    QList<int> clean;
+    for (int level : levels) {
+        if (level >= 1 && level <= 6 && !clean.contains(level)) {
+            clean.append(level);
+        }
+    }
+    std::sort(clean.begin(), clean.end());
+    if (m_tocLevels == clean) {
+        return;
+    }
+    m_tocLevels = clean;
     save();
     Q_EMIT changed();
 }

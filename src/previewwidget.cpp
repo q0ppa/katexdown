@@ -328,6 +328,7 @@ PreviewWidget::PreviewWidget(KTextEditor::MainWindow *mainWindow, KTextEditor::V
         installInputFilter();
         applyTheme();
         render();
+        applyOutlineSettings();
         if (!m_pendingExportPath.isEmpty()) {
             performExport(m_pendingExportPath);
         }
@@ -335,6 +336,7 @@ PreviewWidget::PreviewWidget(KTextEditor::MainWindow *mainWindow, KTextEditor::V
 
     connect(Settings::self(), &Settings::changed, this, &PreviewWidget::applyTheme);
     connect(Settings::self(), &Settings::changed, this, &PreviewWidget::applyMediaPolicy);
+    connect(Settings::self(), &Settings::changed, this, &PreviewWidget::applyOutlineSettings);
 
     setWindowIcon(QIcon::fromTheme(QStringLiteral("text-markdown")));
     applyMediaPolicy();
@@ -571,6 +573,22 @@ void PreviewWidget::render()
 void PreviewWidget::scheduleRender()
 {
     m_debounce->start();
+}
+
+void PreviewWidget::applyOutlineSettings()
+{
+    if (!m_loaded) {
+        return;
+    }
+    // Push the configured heading levels into the page; the page rebuilds its
+    // floating section list from the current DOM (no re-render needed).
+    const QList<int> levels = Settings::self()->tocLevels();
+    QStringList nums;
+    nums.reserve(levels.size());
+    for (int level : levels) {
+        nums << QString::number(level);
+    }
+    runJs(QStringLiteral("window.__setOutlineLevels([%1]);").arg(nums.join(QLatin1Char(','))));
 }
 
 void PreviewWidget::applyTheme()

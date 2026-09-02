@@ -207,6 +207,7 @@
     }
     var fm = frontMatterTable(current);
     el.innerHTML = (fm ? fm.html : "") + md.render(fm ? fm.body : current);
+    rebuildOutline();
   }
 
   window.__setMarkdown = function (text) {
@@ -253,4 +254,209 @@
     document.documentElement.setAttribute("data-pv-scheme", dark ? "dark" : "light");
     document.documentElement.style.setProperty("color-scheme", dark ? "dark" : "light");
   };
+
+  // ---------------------------------------------------------------------
+  // Floating section outline: a round button pinned to the bottom-right of
+  // the preview opens the list of headings (levels chosen in the config
+  // page, H1-H5 by default); clicking an entry scrolls to that section.
+  // ---------------------------------------------------------------------
+  var DEFAULT_OUTLINE_LEVELS = [1, 2, 3, 4, 5];
+  var outlineLevels = DEFAULT_OUTLINE_LEVELS.slice();
+  var outlineBtn = null;
+  var outlinePanel = null;
+  var outlineList = null;
+  var outlineTakenIds = {};
+
+  function ensureOutlineUi() {
+    if (outlineBtn) {
+      return;
+    }
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.id = "kdx-outline-btn";
+    btn.title = "Jump to section";
+    btn.setAttribute("aria-label", "Jump to section");
+    btn.setAttribute("aria-expanded", "false");
+    btn.style.display = "none"; // only shown when the document has headings
+    btn.innerHTML =
+      '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4a1 1 0 1 1 0-2 1 1 0 0 1 0 2Zm0 5a1 1 0 1 1 0-2 1 1 0 0 1 0 2Zm0 5a1 1 0 1 1 0-2 1 1 0 0 1 0 2ZM6 4.75A.75.75 0 0 1 6.75 4h8.5a.75.75 0 0 1 0 1.5h-8.5A.75.75 0 0 1 6 4.75Zm0 5a.75.75 0 0 1 .75-.75h8.5a.75.75 0 0 1 0 1.5h-8.5A.75.75 0 0 1 6 9.75Zm.75 4.25a.75.75 0 0 0 0 1.5h8.5a.75.75 0 0 0 0-1.5Z"/></svg>';
+
+    var panel = document.createElement("div");
+    panel.id = "kdx-outline-panel";
+    panel.hidden = true;
+    var list = document.createElement("ul");
+    list.id = "kdx-outline-list";
+    panel.appendChild(list);
+
+    var root = document.body || document.documentElement;
+    root.appendChild(btn);
+    root.appendChild(panel);
+
+    btn.addEventListener("click", function () {
+      setOutlineOpen(panel.hidden);
+    });
+    // A click anywhere outside the control closes the panel again.
+    document.addEventListener("click", function (e) {
+      if (panel.hidden) {
+        return;
+      }
+      if (panel.contains(e.target) || btn.contains(e.target)) {
+        return;
+      }
+      setOutlineOpen(false);
+    });
+
+    outlineBtn = btn;
+    outlinePanel = panel;
+    outlineList = list;
+  }
+
+  function outlineHeadingText(el) {
+    return (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+  }
+
+  // GitHub-style slug: lowercase, punctuation collapses to dashes. Unicode
+  // letters (e.g. Chinese headings) are kept.
+  function outlineSlug(text) {
+    return (
+      text
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}]+/gu, "-")
+        .replace(/^-+|-+$/g, "") || "section"
+    );
+  }
+
+  function outlineUniqueId(text) {
+    var base = outlineSlug(text);
+    if (!outlineTakenIds[base] && !document.getElementById(base)) {
+      outlineTakenIds[base] = true;
+      return base;
+    }
+    var n = 2;
+    while (outlineTakenIds[base + "-" + n] || document.getElementById(base + "-" + n)) {
+      n += 1;
+    }
+    outlineTakenIds[base + "-" + n] = true;
+    return base + "-" + n;
+  }
+
+  function setOutlineOpen(open) {
+    if (!outlinePanel) {
+      return;
+    }
+    outlinePanel.hidden = !open;
+    outlineBtn.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+
+  function jumpToSection(el) {
+    el.scrollIntoView({ behavior: "smooth", block: "start" });
+    // Restart the flash animation on the heading we just landed on.
+    el.classList.remove("kdx-outline-jumped");
+    void el.offsetWidth;
+    el.classList.add("kdx-outline-jumped");
+    setOutlineOpen(false);
+  }
+
+  function rebuildOutline() {
+    ensureOutlineUi();
+    outlineTakenIds = {};
+    var content = document.getElementById("content");
+    var items = [];
+    if (content) {
+      var headings = content.querySelectorAll("h1, h2, h3, h4, h5, h6");
+      for (var i = 0; i < headings.length; i++) {
+        var el = headings[i];
+        var level = parseInt(el.tagName.charAt(1), 10);
+        if (outlineLevels.indexOf(level) < 0) {
+          continue;
+        }
+        var text = outlineHeadingText(el);
+        if (!text) {
+          continue;
+        }
+        // Anchor id (kept when the heading already has one, e.g. raw HTML)
+        // so in-page "#slug" links resolve like on GitHub.
+        if (!el.id) {
+          el.id = outlineUniqueId(text);
+        }
+        items.push({ el: el, level: level, text: text });
+      }
+    }
+
+    outlineList.textContent = "";
+    outlineBtn.style.display = items.length ? "" : "none";
+    outlinePanel.hidden = true;
+    if (!items.length) {
+      return;
+    }
+
+    var minLevel = items[0].level;
+    for (var j = 1; j < items.length; j++) {
+      if (items[j].level < minLevel) {
+        minLevel = items[j].level;
+      }
+    }
+    for (var k = 0; k < items.length; k++) {
+      (function (item) {
+        var li = document.createElement("li");
+        li.className = "kdx-outline-item";
+        li.setAttribute("role", "button");
+        li.setAttribute("tabindex", "0");
+        li.setAttribute("data-level", String(item.level));
+        li.style.paddingLeft = 8 + (item.level - minLevel) * 14 + "px";
+        li.title = item.text;
+
+        var lvl = document.createElement("span");
+        lvl.className = "kdx-outline-lvl";
+        lvl.textContent = "H" + item.level;
+        var text = document.createElement("span");
+        text.className = "kdx-outline-text";
+        text.textContent = item.text;
+        li.appendChild(lvl);
+        li.appendChild(text);
+
+        function activate() {
+          jumpToSection(item.el);
+        }
+        li.addEventListener("click", activate);
+        li.addEventListener("keydown", function (e) {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            activate();
+          }
+        });
+        outlineList.appendChild(li);
+      })(items[k]);
+    }
+  }
+
+  // Which heading levels the outline lists (driven from the plugin settings).
+  window.__setOutlineLevels = function (levels) {
+    var clean = [];
+    for (var i = 0; levels && i < levels.length; i++) {
+      var lvl = Math.floor(Number(levels[i]));
+      if (lvl >= 1 && lvl <= 6 && clean.indexOf(lvl) < 0) {
+        clean.push(lvl);
+      }
+    }
+    clean.sort(function (a, b) {
+      return a - b;
+    });
+    outlineLevels = clean;
+    rebuildOutline();
+  };
+
+  // preview.js lives in <head>, so the document body does not exist yet at
+  // parse time; build the control once the DOM is ready. This also makes a
+  // standalone exported .html re-wire the control from the already-rendered
+  // headings.
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", function () {
+      ensureOutlineUi();
+      rebuildOutline();
+    });
+  } else {
+    ensureOutlineUi();
+    rebuildOutline();
+  }
 })();

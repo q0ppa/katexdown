@@ -12,7 +12,7 @@
 
 pkgname=katexdown-git
 _pkgbase=katexdown
-pkgver=0.2.0.r1.g6ec7085
+pkgver=0.2.0.r2.g7b0c601
 pkgrel=1
 pkgdesc="Markdown preview side panel for Kate with KaTeX math and custom CSS (katdown fork)"
 arch=('x86_64')

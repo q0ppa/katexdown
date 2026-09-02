@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(katexdown VERSION 0.3.5 LANGUAGES CXX)
+project(katexdown VERSION 0.3.6 LANGUAGES CXX)
 
 set(QT_MIN_VERSION 6.5.0)
 set(KF_MIN_VERSION 6.0.0)
