@@ -101,6 +101,7 @@ private Q_SLOTS:
     void githubCssCanBeDisabled();
     void exportsStandaloneHtml();
     void imageModesControlDecoding();
+    void parkedImageKeepsItsRealSize();
     void relativeCssResolvesAgainstDataDir();
     void outlineListsConfiguredHeadings();
     void enginesAreLoadedOnlyWhenTheTextNeedsThem();
@@ -239,7 +240,13 @@ void RenderFeaturesTest::exportsStandaloneHtml()
 void RenderFeaturesTest::imageModesControlDecoding()
 {
     QVERIFY(m_dir.isValid());
-    const QString png = QStringLiteral("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==");
+    // A real 64x32 PNG, inline so the test carries no fixture file. It must not
+    // be 1x1: the parking placeholder itself decodes as 1x1, and the manager
+    // must never record the placeholder's box as the image's (1x1 images need
+    // no recorded box at all). kdxSized "1" below is meaningful only for a
+    // real-sized image.
+    const QString png = QStringLiteral(
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAIAAAAt/+nTAAAATklEQVR4nO3PUQkAIBTAwBfNaEYzmiH8OITBAtxmr/N1wwUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjx2AZO6ALV3naQ3AAAAAElFTkSuQmCC");
 
     Settings::self()->setImageMode(Settings::DecodeAll);
     QString filler;
@@ -299,6 +306,63 @@ void RenderFeaturesTest::imageModesControlDecoding()
     QVERIFY(waitForCond(preview.get(),
                         QStringLiteral("(function () { var i = document.querySelector('#content img'); return (i.dataset.kdx || '') === ''; })()"),
                         QStringLiteral("true")));
+
+    delete doc;
+    Settings::self()->setImageMode(Settings::Adaptive); // leave the default for later tests
+}
+
+// Repro: an image parked BEFORE its first decode (i.e. below the fold when the
+// document rendered) must come back at its real size once scrolled to. The
+// parking placeholder is itself a 1x1 image; recording ITS dimensions as the
+// image's box would render every such image as a ~1px dot.
+void RenderFeaturesTest::parkedImageKeepsItsRealSize()
+{
+    QVERIFY(m_dir.isValid());
+    // A real 64x32 PNG, inline so the test carries no fixture file.
+    const QString png = QStringLiteral(
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAIAAAAt/+nTAAAATklEQVR4nO3PUQkAIBTAwBfNaEYzmiH8OITBAtxmr/N1wwUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjx2AZO6ALV3naQ3AAAAAElFTkSuQmCC");
+
+    Settings::self()->setImageMode(Settings::MemorySaver);
+    QString filler;
+    for (int i = 0; i < 200; ++i) {
+        filler += QStringLiteral("filler line %1 pushing the image below the fold\n").arg(i);
+    }
+    KTextEditor::Document *doc = openDocument(QStringLiteral("# imgs\n\n%1\n\n![pic](%2)\n\ntail\n").arg(filler, png));
+    auto preview = makePreview(doc);
+    preview->resize(800, 600);
+    preview->show();
+    QVERIFY(waitForPageText(preview.get(), QLatin1String("tail")));
+
+    // Far below the fold, the manager parks the image before Chromium can
+    // decode it (data-kdx holds the real src).
+    QVERIFY(waitForCond(preview.get(),
+                        QStringLiteral("(function () { var i = document.querySelector('#content img'); return (i.dataset.kdx || '') !== ''; })()"),
+                        QStringLiteral("true")));
+
+    // Give the 1x1 placeholder time to decode and fire its load event, then
+    // make sure that placeholder decode never recorded ITS box as the image's
+    // (regression: the parked image used to be baked to width=1 height=1
+    // aspect-ratio 1/1 here, collapsing it to a ~1px dot for good).
+    QDeadlineTimer settle(2000);
+    while (!settle.hasExpired()) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    }
+    QCOMPARE(evalJs(preview.get(),
+                    QStringLiteral("(function () { var i = document.querySelector('#content img'); return (i.dataset.kdxSized || '') + '|' + i.getAttribute('width'); })()")),
+             QStringLiteral("|null"));
+
+    // Scroll to the bottom: the image re-enters the keep zone, the real src is
+    // swapped back in and decodes (naturalWidth 64, not the placeholder's 1).
+    evalJs(preview.get(), QStringLiteral("window.scrollTo(0, document.body.scrollHeight); 'ok'"));
+    QVERIFY(waitForCond(preview.get(),
+                        QStringLiteral("String(document.querySelector('#content img').naturalWidth)"),
+                        QStringLiteral("64")));
+
+    // The rendered box must be the image's real size, not the placeholder's 1x1.
+    const QString dims = evalJs(preview.get(),
+                                QStringLiteral("(function () { var i = document.querySelector('#content img'); return i.getAttribute('width') + '|' + i.getBoundingClientRect().width; })()"));
+    QVERIFY2(dims == QStringLiteral("64|64") || dims.startsWith(QLatin1String("64|")),
+             qPrintable(QStringLiteral("parked image collapsed to the placeholder box, got: %1").arg(dims)));
 
     delete doc;
     Settings::self()->setImageMode(Settings::Adaptive); // leave the default for later tests

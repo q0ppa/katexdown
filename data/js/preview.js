@@ -319,6 +319,15 @@
     if (img.dataset.kdxSized || img.naturalWidth <= 0 || img.naturalHeight <= 0) {
       return;
     }
+    // Never mistake the 1x1 parking placeholder for the real image. Its load
+    // event can arrive after swapIn() already restored the real src (the
+    // placeholder finished decoding while the real fetch was still pending),
+    // so "is parked" is not a reliable discriminator there — the decoded
+    // 1x1 size is. A genuinely 1x1 image needs no box recorded anyway: its
+    // box is 1x1 with or without width/height attributes.
+    if (img.naturalWidth === 1 && img.naturalHeight === 1) {
+      return;
+    }
     if (img.getAttribute("width") === null && img.getAttribute("height") === null) {
       img.setAttribute("width", String(img.naturalWidth));
       img.setAttribute("height", String(img.naturalHeight));
@@ -362,18 +371,32 @@
 
   function onImgLoad(e) {
     var img = e.target;
+    // A load while the image is parked can only be the placeholder (the real
+    // src is stashed in data-kdx until swapIn): there is nothing to record,
+    // and the placeholder's 1x1 decode must never be mistaken for the image.
+    if (img.dataset.kdx) {
+      return;
+    }
     recordDims(img);
     // A decode may finish after the image already scrolled out of the zone
     // (fast scrolling): release it right away instead of waiting for the
     // observer's next crossing.
-    if (!img.dataset.kdx && !imgInZone(img)) {
+    if (!imgInZone(img)) {
       swapOut(img);
     }
   }
 
   function onImgError(e) {
     // Leave failed images alone: no decode memory to save, and a broken-image
-    // indicator is more honest than an empty placeholder.
+    // indicator is more honest than an empty placeholder. While the image is
+    // parked, an error can only be an artifact of parking (the placeholder
+    // never fails; an in-flight fetch of the real src may be aborted by the
+    // swap) — not a verdict on the real src, which swapIn may still fetch
+    // successfully from cache. Marking it failed here would strand the image
+    // on the placeholder forever.
+    if (e.target.dataset.kdx) {
+      return;
+    }
     e.target.dataset.kdxFailed = "1";
   }
 
