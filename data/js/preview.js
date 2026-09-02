@@ -287,14 +287,22 @@
   //   "saver"  the same machinery as auto, but always on and with a tighter
   //            keep zone (only images near the viewport ever decode, and each
   //            is released the moment it scrolls out of the zone).
-  // Parking: an image's real src is stashed in data-kdx and replaced with a
+  // Parking is a pure swap of the displayed resource and must never move the
+  // layout: an image's real src is stashed in data-kdx and replaced with a
   // 1x1 transparent GIF, so Chromium has nothing left to decode — and the
-  // decoded bitmap of an image that scrolled away is released. An
-  // IntersectionObserver whose root margin is the keep zone swaps the real src
-  // back in as an image approaches the viewport and parks it again once it has
-  // left. Width/height attributes plus an explicit aspect-ratio are recorded on
-  // first decode so the layout box survives the swaps (base.css adds
-  // height:auto for the modes that manage images).
+  // decoded bitmap of an image that scrolled away is released. swapOut() only
+  // parks an image whose layout box is known — it has decoded once (its
+  // width/height/aspect-ratio were recorded, see recordDims) or the author
+  // pinned both dimensions — so the box (and the document height) survives
+  // the swap untouched. A lazy image that never decoded has no decoded memory
+  // to free and no known box, so it is left alone until the browser loads it
+  // near the viewport; its box appears then, exactly like on any
+  // lazy-loading page, and from its first decode on it is parked the same
+  // way. An IntersectionObserver whose root margin is the keep zone swaps the
+  // real src back in as an image approaches the viewport and parks it again
+  // once it has left. base.css adds height:auto for the modes that manage
+  // images, so the recorded width/height/aspect-ratio scale like the real
+  // image did (e.g. under max-width:100%).
   var imgMode = "auto";
   // Auto arms the parking machinery once a document passes this many images.
   var IMG_AUTO_ARM_AT = 12;
@@ -314,7 +322,9 @@
   // Remember the image's box (from its first decode) so swapping the src to
   // the 1x1 placeholder does not collapse the layout. Author-pinned dimensions
   // are left alone (kdxSized "0"); otherwise the natural size is stored as
-  // width/height attributes plus an explicit aspect ratio.
+  // width/height attributes plus an explicit aspect ratio. The recording only
+  // ever happens from a real decode (parked images ignore their load events),
+  // so a parked image always has a known box when it is parked.
   function recordDims(img) {
     if (img.dataset.kdxSized || img.naturalWidth <= 0 || img.naturalHeight <= 0) {
       return;
@@ -338,12 +348,21 @@
     }
   }
 
-  // Park an image: stash the real src and drop a placeholder in (freeing the
-  // decoded bitmap once it had one).
+  // Park an image: stash the real src and drop the 1x1 placeholder in
+  // (freeing the decoded bitmap once it had one). Swapping the src must never
+  // change the layout, so this only parks an image whose box is known: it has
+  // decoded (naturalWidth > 0 — recordDims below fixes its size) or the
+  // author pinned both width and height attributes. An image that never
+  // decoded has no decoded memory to free and no known box — parking it
+  // would collapse the document height below it, so it keeps its real src
+  // and stays native-lazy instead.
   function swapOut(img) {
     var src = img.getAttribute("src");
     if (img.dataset.kdx || img.dataset.kdxSkip || img.dataset.kdxFailed || !src || src === IMG_PLACEHOLDER) {
       return;
+    }
+    if (img.naturalWidth <= 0 && !(img.hasAttribute("width") && img.hasAttribute("height"))) {
+      return; // box unknown: parking would shift the document height
     }
     recordDims(img);
     img.dataset.kdx = src;
@@ -466,7 +485,10 @@
       }
       recordDims(img);
       if (!imgInZone(img)) {
-        swapOut(img); // far off-screen: park before Chromium can decode it
+        // Far off-screen: park it — swapOut refuses unless the box is known,
+        // so an image that never decoded stays native-lazy instead of
+        // collapsing the document height.
+        swapOut(img);
       }
     }
     if (!manage) {

@@ -101,7 +101,7 @@ private Q_SLOTS:
     void githubCssCanBeDisabled();
     void exportsStandaloneHtml();
     void imageModesControlDecoding();
-    void parkedImageKeepsItsRealSize();
+    void parkingPreservesTheImageBox();
     void relativeCssResolvesAgainstDataDir();
     void outlineListsConfiguredHeadings();
     void enginesAreLoadedOnlyWhenTheTextNeedsThem();
@@ -311,58 +311,96 @@ void RenderFeaturesTest::imageModesControlDecoding()
     Settings::self()->setImageMode(Settings::Adaptive); // leave the default for later tests
 }
 
-// Repro: an image parked BEFORE its first decode (i.e. below the fold when the
-// document rendered) must come back at its real size once scrolled to. The
-// parking placeholder is itself a 1x1 image; recording ITS dimensions as the
-// image's box would render every such image as a ~1px dot.
-void RenderFeaturesTest::parkedImageKeepsItsRealSize()
+// Parking (replacing the displayed src of an image that scrolled far away
+// with the invisible 1x1 placeholder, releasing its decoded bitmap) must
+// never change the document layout: swapOut() only parks an image whose box
+// is known — it has decoded (width/height/aspect-ratio recorded) or the
+// author sized it — so the placeholder swap leaves the document height
+// untouched. An image that never decoded is never parked (nothing decoded to
+// free, no known box): it keeps its real src and loads like any lazy image
+// once it approaches the viewport. The regression this guards: images below
+// the fold used to be parked while still undecoded, collapsing the document
+// height below them (or, earlier, baking the 1x1 placeholder box into them
+// so they stayed ~1px dots).
+void RenderFeaturesTest::parkingPreservesTheImageBox()
 {
     QVERIFY(m_dir.isValid());
-    // A real 64x32 PNG, inline so the test carries no fixture file.
+    // A real 64x32 PNG, inline so the test carries no fixture file. It must
+    // not be 1x1: the parking placeholder decodes as 1x1 too, and the manager
+    // must never treat that as the image's size.
     const QString png = QStringLiteral(
         "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAIAAAAt/+nTAAAATklEQVR4nO3PUQkAIBTAwBfNaEYzmiH8OITBAtxmr/N1wwUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjx2AZO6ALV3naQ3AAAAAElFTkSuQmCC");
 
     Settings::self()->setImageMode(Settings::MemorySaver);
-    QString filler;
-    for (int i = 0; i < 200; ++i) {
-        filler += QStringLiteral("filler line %1 pushing the image below the fold\n").arg(i);
+    QString fillerA;
+    for (int i = 0; i < 500; ++i) {
+        fillerA += QStringLiteral("filler line %1 above the image\n").arg(i);
     }
-    KTextEditor::Document *doc = openDocument(QStringLiteral("# imgs\n\n%1\n\n![pic](%2)\n\ntail\n").arg(filler, png));
+    QString fillerB;
+    for (int i = 0; i < 500; ++i) {
+        fillerB += QStringLiteral("filler line %1 below the image\n").arg(i);
+    }
+    KTextEditor::Document *doc = openDocument(QStringLiteral("# imgs\n\n%1\n\n![pic](%2)\n\n%3\nend of document\n").arg(fillerA, png, fillerB));
     auto preview = makePreview(doc);
     preview->resize(800, 600);
     preview->show();
-    QVERIFY(waitForPageText(preview.get(), QLatin1String("tail")));
+    QVERIFY(waitForPageText(preview.get(), QLatin1String("end of document")));
 
-    // Far below the fold, the manager parks the image before Chromium can
-    // decode it (data-kdx holds the real src).
+    const QString imgJs = QStringLiteral("document.querySelector('#content img')");
+    // The image must sit far below the fold (beyond the keep zone of ~1.3
+    // viewport heights and Chromium's own lazy-loading distance), or the test
+    // below would describe an in-zone image instead of a below-the-fold one.
     QVERIFY(waitForCond(preview.get(),
-                        QStringLiteral("(function () { var i = document.querySelector('#content img'); return (i.dataset.kdx || '') !== ''; })()"),
+                        QStringLiteral("Math.round(%1.getBoundingClientRect().top) > 2000").arg(imgJs),
                         QStringLiteral("true")));
 
-    // Give the 1x1 placeholder time to decode and fire its load event, then
-    // make sure that placeholder decode never recorded ITS box as the image's
-    // (regression: the parked image used to be baked to width=1 height=1
-    // aspect-ratio 1/1 here, collapsing it to a ~1px dot for good).
-    QDeadlineTimer settle(2000);
+    // Far below the fold and never decoded: it is NOT parked. It keeps its
+    // real src and no box is recorded (parking it now would collapse the
+    // document height below it; the old code parked it immediately).
+    QDeadlineTimer settle(700);
     while (!settle.hasExpired()) {
         QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
     }
     QCOMPARE(evalJs(preview.get(),
-                    QStringLiteral("(function () { var i = document.querySelector('#content img'); return (i.dataset.kdxSized || '') + '|' + i.getAttribute('width'); })()")),
-             QStringLiteral("|null"));
+                    QStringLiteral("(function () { var i = %1; return ((i.dataset.kdx || '') === '') + '|' + (i.src.indexOf('data:image/png') === 0) + '|' + (i.getAttribute('width') || '') + '|' + (i.dataset.kdxSized || '') + '|' + (i.naturalWidth === 0); })()").arg(imgJs)),
+             QStringLiteral("true|true|||true"));
 
-    // Scroll to the bottom: the image re-enters the keep zone, the real src is
-    // swapped back in and decodes (naturalWidth 64, not the placeholder's 1).
+    // Scroll it into the viewport: it loads at its natural size and its box is
+    // recorded from the real decode (64x32).
+    evalJs(preview.get(),
+           QStringLiteral("(function () { var i = %1; window.scrollTo(0, i.getBoundingClientRect().top + window.scrollY - 200); })()").arg(imgJs));
+    QVERIFY(waitForCond(preview.get(),
+                        QStringLiteral("String(%1.naturalWidth)").arg(imgJs),
+                        QStringLiteral("64")));
+    QVERIFY(waitForCond(preview.get(),
+                        QStringLiteral("(function () { var i = %1; return i.getAttribute('width') + '|' + i.getBoundingClientRect().width; })()").arg(imgJs),
+                        QStringLiteral("64|64")));
+    const qlonglong heightAfterDecode = evalJs(preview.get(), QStringLiteral("document.body.scrollHeight")).toLongLong();
+    QVERIFY2(heightAfterDecode > 3000, qPrintable(QStringLiteral("document unexpectedly short: %1").arg(heightAfterDecode)));
+
+    // Scroll far past it (to the bottom of the document): the decoded image is
+    // now parked on the placeholder (its decoded bitmap is released) — with
+    // the box preserved, so the document height does not change at all.
     evalJs(preview.get(), QStringLiteral("window.scrollTo(0, document.body.scrollHeight); 'ok'"));
     QVERIFY(waitForCond(preview.get(),
-                        QStringLiteral("String(document.querySelector('#content img').naturalWidth)"),
-                        QStringLiteral("64")));
+                        QStringLiteral("(function () { var i = %1; return ((i.dataset.kdx || '') !== '') + '|' + (i.src.indexOf('data:image/gif') === 0); })()").arg(imgJs),
+                        QStringLiteral("true|true")));
+    QVERIFY(waitForCond(preview.get(),
+                        QStringLiteral("(function () { var i = %1; return i.getAttribute('width') + '|' + i.getBoundingClientRect().width; })()").arg(imgJs),
+                        QStringLiteral("64|64")));
+    QCOMPARE(evalJs(preview.get(), QStringLiteral("document.body.scrollHeight")).toLongLong(), heightAfterDecode);
 
-    // The rendered box must be the image's real size, not the placeholder's 1x1.
-    const QString dims = evalJs(preview.get(),
-                                QStringLiteral("(function () { var i = document.querySelector('#content img'); return i.getAttribute('width') + '|' + i.getBoundingClientRect().width; })()"));
-    QVERIFY2(dims == QStringLiteral("64|64") || dims.startsWith(QLatin1String("64|")),
-             qPrintable(QStringLiteral("parked image collapsed to the placeholder box, got: %1").arg(dims)));
+    // Scrolling back to it swaps the real src in again; the box and the
+    // document height stay untouched the whole way.
+    evalJs(preview.get(),
+           QStringLiteral("(function () { var i = %1; window.scrollTo(0, i.getBoundingClientRect().top + window.scrollY - 200); })()").arg(imgJs));
+    QVERIFY(waitForCond(preview.get(),
+                        QStringLiteral("(function () { var i = %1; return ((i.dataset.kdx || '') === '') + '|' + String(i.naturalWidth); })()").arg(imgJs),
+                        QStringLiteral("true|64")));
+    QVERIFY(waitForCond(preview.get(),
+                        QStringLiteral("(function () { var i = %1; return i.getAttribute('width') + '|' + i.getBoundingClientRect().width; })()").arg(imgJs),
+                        QStringLiteral("64|64")));
+    QCOMPARE(evalJs(preview.get(), QStringLiteral("document.body.scrollHeight")).toLongLong(), heightAfterDecode);
 
     delete doc;
     Settings::self()->setImageMode(Settings::Adaptive); // leave the default for later tests

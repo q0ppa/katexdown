@@ -5,6 +5,16 @@ Issues and PRs are welcome. File an issue through the
 PR against the default branch. PR titles follow
 [Conventional Commits](https://www.conventionalcommits.org): `type(scope): summary`.
 
+## Design docs
+
+Major features, design decisions and pitfalls are recorded in `design/` — one
+focused doc per topic (see `design/README.md` for the format and index). If a
+change introduces or alters a feature or an invariant, create or update its
+doc in the same commit; the PR template asks for this. `AGENTS.md` at the repo
+root carries the same rule for agent sessions, and `design/lazyrender.md`
+documents the preview loading & memory architecture (page lifecycle, engine
+gating, image decode policy) with the invariants a change must not break.
+
 ## AI and agent contributions
 
 AI-assisted work is welcome. The one requirement is transparency: a reviewer should be able
