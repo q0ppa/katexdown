@@ -1,5 +1,7 @@
 #include "settings.h"
 
+#include <QtGlobal>
+
 #include <algorithm>
 
 #include <KConfigGroup>
@@ -71,6 +73,10 @@ void Settings::load()
         m_imageMode = Adaptive;
     }
     m_customCssFiles = cfg.readEntry("CustomCssFiles", QStringList());
+    // Missing key -> the default cap; an explicit 0 means "off" and must
+    // survive a save/load round-trip. Anything outside a sane range is
+    // clamped to off/2048 rather than stored as-is.
+    m_v8HeapCapMb = qBound(0, cfg.readEntry("V8HeapCapMb", DefaultV8HeapCapMb), 2048);
     // Missing key -> defaultTocLevels(); an explicitly empty list means "no
     // levels, outline off".
     m_tocLevels = sanitizedLevels(cfg.readEntry("TocLevels", defaultTocLevels()));
@@ -88,6 +94,7 @@ void Settings::save() const
     const char *imgMode = m_imageMode == MemorySaver ? "saver" : m_imageMode == DecodeAll ? "eager" : "auto";
     cfg.writeEntry("ImageMode", QString::fromLatin1(imgMode));
     cfg.writeEntry("CustomCssFiles", m_customCssFiles);
+    cfg.writeEntry("V8HeapCapMb", m_v8HeapCapMb);
     QStringList levels;
     for (int level : m_tocLevels) {
         levels << QString::number(level);
@@ -152,6 +159,17 @@ void Settings::setImageMode(ImageMode mode)
         return;
     }
     m_imageMode = mode;
+    save();
+    Q_EMIT changed();
+}
+
+void Settings::setV8HeapCapMb(int mb)
+{
+    const int clean = qBound(0, mb, 2048);
+    if (m_v8HeapCapMb == clean) {
+        return;
+    }
+    m_v8HeapCapMb = clean;
     save();
     Q_EMIT changed();
 }

@@ -185,6 +185,16 @@ page, which keeps that churn small in the first place. The closed-panel rules
 above remain the biggest lever: a preview left closed releases its renderer
 entirely.
 
+A renderer's JavaScript (V8) heap is additionally capped — 128 MB by default,
+configurable on the settings page (0 turns it off). V8 then reclaims what
+full re-renders leave behind itself, instead of the memory only ever coming
+back when the renderer process is recycled, so a long session plateaus rather
+than spiking between recycles. The cap is invisible while a document's
+rendering fits under it; very large or math-heavy documents can re-render
+slower under a low cap (the engine has to free memory mid-render), so it can
+be raised or switched off for those. The engine reads the cap only when it
+starts, so changing it needs a Kate restart.
+
 A preview page is also trimmed to the document at hand: KaTeX, the syntax
 highlighter and the YAML front-matter parser are only loaded when the current
 document actually uses math, fenced code blocks or front matter (a page
@@ -260,6 +270,7 @@ Settings -> Configure Kate -> (Plugins -> enable `Katdown`) -> Katdown.
 | Style | GitHub / Match editor or system theme | GitHub uses GitHub's palette. Match recolors the same layout from your active editor theme. |
 | GitHub variant | Auto / Light / Dark | Which GitHub palette to use. Auto follows whether your system is light or dark. Only applies in GitHub style. |
 | Load media previews from remote URLs | On / Off (default) | When on, images referencing `http(s)` URLs are fetched and rendered. When off (the default), the preview loads no remote resources and works fully offline. Images with paths relative to the document always load regardless of this setting. |
+| JS memory cap | 0–1024 MB (0 = off; default 128) | Bounds the preview's JavaScript (V8) heap, so memory that full re-renders leave behind is reclaimed by the engine itself instead of only on a renderer restart. Free while a document's rendering fits under it; large or math-heavy documents can re-render slower under a low cap. Applies when the preview's web engine starts — change needs a Kate restart. An explicit `--js-flags=…` in the `QTWEBENGINE_CHROMIUM_FLAGS` environment variable overrides it. |
 | Section outline | H1–H6 checkboxes | Which heading levels the floating outline button in the preview lists; click an entry to jump to that section. H1–H5 are on by default; unchecking all hides the button. |
 | Custom stylesheets | list | Files appended after the built-in style, in listed order. Relative paths resolve against the Katdown data dir. |
 

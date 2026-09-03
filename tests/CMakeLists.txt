@@ -55,3 +55,13 @@ foreach(tgt rendermemorytest previewlifecycletest renderfeaturestest followmodet
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu --no-sandbox;XDG_CONFIG_HOME=${CMAKE_CURRENT_BINARY_DIR}/xdg/config;XDG_CACHE_HOME=${CMAKE_CURRENT_BINARY_DIR}/xdg/cache;XDG_DATA_HOME=${CMAKE_CURRENT_BINARY_DIR}/xdg/data;KATEXDOWN_DATA_DIR=${CMAKE_SOURCE_DIR}/runtime"
     )
 endforeach()
+
+# Pure environment-flag logic (kdxchromiumflags.h): no QtWebEngine involved,
+# so this binary needs no widget/engine stack and runs instantly.
+add_executable(envflagstest
+    envflagstest.cpp
+)
+target_include_directories(envflagstest PRIVATE ../src)
+target_link_libraries(envflagstest PRIVATE Qt6::Test)
+add_test(NAME envflagstest COMMAND envflagstest)
+set_tests_properties(envflagstest PROPERTIES TIMEOUT 60)

@@ -1,5 +1,6 @@
 #include "previewwidget.h"
 #include "katexdownpaths.h"
+#include "kdxchromiumflags.h"
 #include "settings.h"
 
 #include <QAction>
@@ -424,6 +425,15 @@ PreviewWidget::PreviewWidget(KTextEditor::MainWindow *mainWindow, KTextEditor::V
     : QWidget(parent)
     , m_mainWindow(mainWindow)
 {
+    // Apply the configured V8 heap cap before this widget creates its own
+    // profile below (which is what starts the web engine when the preview is
+    // the first QWebEngine user in the process — see kdxchromiumflags.h).
+    // The plugin constructor already tried this at plugin load; repeating it
+    // here covers direct use (the tests drive this widget without the
+    // plugin) and makes the call order-independent. Idempotent; no-op when
+    // the environment already carries explicit --js-flags or the cap is off.
+    kdxchromiumflags::applyV8HeapCap(kdxchromiumflags::effectiveV8HeapCapMb(Settings::self()->v8HeapCapMb()));
+
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
 

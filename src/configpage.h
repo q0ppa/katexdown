@@ -8,6 +8,7 @@ class QLabel;
 class QListWidget;
 class QPushButton;
 class QNetworkAccessManager;
+class QSpinBox;
 
 /**
  * Settings page shown under Kate's plugin configuration: choose between GitHub
@@ -40,6 +41,8 @@ private:
     QComboBox *m_variant = nullptr;
     QComboBox *m_loading = nullptr;
     QComboBox *m_imageMode = nullptr;
+    // Renderer JS heap cap in MB (0 = off); see Settings::v8HeapCapMb.
+    QSpinBox *m_v8Cap = nullptr;
     QCheckBox *m_githubCss = nullptr;
     QCheckBox *m_remoteMedia = nullptr;
     // Heading level 1..6 -> index 0..5.

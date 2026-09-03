@@ -30,11 +30,13 @@ major feature / design / pitfall — in the same change as the code.**
 Headless (matches CI / the CTest environment):
 
 ```sh
-cd build && cmake --build . --target renderfeaturestest previewlifecycletest followmodetest
+cd build && cmake --build . --target renderfeaturestest previewlifecycletest followmodetest rendermemorytest envflagstest
 QT_QPA_PLATFORM=offscreen QTWEBENGINE_CHROMIUM_FLAGS="--disable-gpu --no-sandbox" \
 XDG_CONFIG_HOME=/tmp/kdxcfg XDG_CACHE_HOME=/tmp/kdxcache XDG_DATA_HOME=/tmp/kdxdata \
-KATEXDOWN_DATA_DIR=$PWD/../runtime ./bin/renderfeaturestest        # or a single test name
+KATEXDOWN_DATA_DIR=$PWD/../runtime ./bin/rendermemorytest        # or a single test name
 ```
 
 After editing `data/` assets, rebuild the test targets (resources are compiled
-into each binary). Run all three suites before finishing.
+into each binary). Run all suites before finishing (`envflagstest` is pure
+flag logic, instant; `rendermemorytest` is the slow RSS one and needs Linux
+`/proc`).

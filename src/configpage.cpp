@@ -19,6 +19,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QPushButton>
+#include <QSpinBox>
 #include <QUrl>
 #include <QVBoxLayout>
 
@@ -101,6 +102,30 @@ ConfigPage::ConfigPage(QWidget *parent)
     imageHint->setWordWrap(true);
     imageHint->setEnabled(false);
     form->addRow(QString(), imageHint);
+
+    // Renderer JS heap cap: the preview's renderer never collects the garbage
+    // full re-renders leave behind on its own, so a cap makes V8 collect under
+    // pressure and turns unbounded growth into a bounded plateau (see
+    // design/lazyrender.md, "JS heap guard"). 0 disables the cap.
+    m_v8Cap = new QSpinBox(this);
+    m_v8Cap->setRange(0, 1024);
+    m_v8Cap->setSingleStep(64);
+    m_v8Cap->setSuffix(i18n(" MB"));
+    m_v8Cap->setSpecialValueText(i18n("Off — Chromium's default (no cap)"));
+    form->addRow(i18n("JS memory cap:"), m_v8Cap);
+    auto *v8Hint = new QLabel(
+        i18n("Bounds the preview's JavaScript heap (V8), in MB — the renderer otherwise never \n"
+             "returns the memory that full re-renders of a document leave behind, and only a \n"
+             "renderer restart reclaims it. The cap is free while a document's rendering fits \n"
+             "under it and steps in once a session re-renders large documents again and again. \n"
+             "Very large or math-heavy documents can render slower with a low cap; raise it or \n"
+             "turn it off for those. Default 128 MB. Applies when the preview's web engine starts, \n"
+             "so a change needs a Kate restart. An explicit --js-flags=… in the environment's \n"
+             "QTWEBENGINE_CHROMIUM_FLAGS overrides this setting."),
+        this);
+    v8Hint->setWordWrap(true);
+    v8Hint->setEnabled(false);
+    form->addRow(QString(), v8Hint);
 
     m_githubCss = new QCheckBox(i18n("Use the built-in GitHub stylesheet"), this);
     form->addRow(QString(), m_githubCss);
@@ -230,6 +255,9 @@ ConfigPage::ConfigPage(QWidget *parent)
     connect(m_imageMode, &QComboBox::currentIndexChanged, this, [this]() {
         Q_EMIT changed();
     });
+    connect(m_v8Cap, &QSpinBox::valueChanged, this, [this]() {
+        Q_EMIT changed();
+    });
     for (int level = 1; level <= 6; ++level) {
         connect(m_tocLevel[level - 1], &QCheckBox::toggled, this, [this]() { Q_EMIT changed(); });
     }
@@ -352,6 +380,7 @@ void ConfigPage::apply()
     s->setUseGithubCss(m_githubCss->isChecked());
     s->setLoadingMode(static_cast<Settings::LoadingMode>(m_loading->currentData().toInt()));
     s->setImageMode(static_cast<Settings::ImageMode>(m_imageMode->currentData().toInt()));
+    s->setV8HeapCapMb(m_v8Cap->value());
     QList<int> levels;
     for (int level = 1; level <= 6; ++level) {
         if (m_tocLevel[level - 1]->isChecked()) {
@@ -375,6 +404,7 @@ void ConfigPage::reset()
     m_githubCss->setChecked(s->useGithubCss());
     m_loading->setCurrentIndex(m_loading->findData(s->loadingMode()));
     m_imageMode->setCurrentIndex(m_imageMode->findData(s->imageMode()));
+    m_v8Cap->setValue(s->v8HeapCapMb());
     m_cssList->clear();
     const QStringList css = s->customCssFiles();
     for (const QString &file : css) {
@@ -395,6 +425,7 @@ void ConfigPage::defaults()
     m_githubCss->setChecked(true);
     m_loading->setCurrentIndex(m_loading->findData(Settings::LazyKeep));
     m_imageMode->setCurrentIndex(m_imageMode->findData(Settings::Adaptive));
+    m_v8Cap->setValue(Settings::DefaultV8HeapCapMb);
     m_cssList->clear();
     for (int level = 1; level <= 6; ++level) {
         m_tocLevel[level - 1]->setChecked(level <= 5); // H1-H5 default, H6 off

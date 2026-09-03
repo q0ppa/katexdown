@@ -1,6 +1,8 @@
 #include "plugin.h"
 #include "configpage.h"
+#include "kdxchromiumflags.h"
 #include "pluginview.h"
+#include "settings.h"
 
 #include <KPluginFactory>
 
@@ -10,6 +12,13 @@ KatexdownPlugin::KatexdownPlugin(QObject *parent, const QVariantList &args)
     : KTextEditor::Plugin(parent)
 {
     Q_UNUSED(args);
+    // Best effort, as early as possible: Kate loads plugins before creating
+    // any tool view, so unless another plugin already started QtWebEngine
+    // this is before any renderer process exists and the V8 heap cap below
+    // still reaches Chromium. PreviewWidget repeats this before creating its
+    // own profile (kdxchromiumflags.h). No-op when the user's own
+    // QTWEBENGINE_CHROMIUM_FLAGS already carries --js-flags.
+    kdxchromiumflags::applyV8HeapCap(kdxchromiumflags::effectiveV8HeapCapMb(Settings::self()->v8HeapCapMb()));
 }
 
 QObject *KatexdownPlugin::createView(KTextEditor::MainWindow *mainWindow)

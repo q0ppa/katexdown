@@ -223,6 +223,62 @@ so a grid of small images stays cheap — or a flat amount when
 `KATEXDOWN_MEM_IMG_CHARGE_MB` is set. A photo-browsing session therefore
 recycles at the next quiet moment instead of accreting without bound.
 
+### JS heap guard (Settings::V8HeapCapMb, `src/kdxchromiumflags.h`)
+
+The recycle bounds a renderer's *lifetime*, not its peaks: between recycles a
+single renderer still grows by tens to hundreds of MB per full re-render (the
+growth is V8-retained garbage — every `__setMarkdown` strands the replaced DOM
+tree in the old space, and Chromium never major-GCs on its own, so nothing is
+collected until pressure or process death). The JS heap guard caps that old
+space (`--js-flags=--max-old-space-size=N`) so V8 itself collects under
+pressure: a session that keeps re-rendering a document plateaus instead of
+climbing until the recycle fires.
+
+- **Delivery is the constraint.** QtWebEngine has no runtime API for flags;
+it reads `QTWEBENGINE_CHROMIUM_FLAGS` once, when the engine starts (first
+profile/page/view — effectively the first renderer process). The cap is
+merged into that env var before the engine can start, from two idempotent
+points: the plugin constructor (plugins load before kate creates any tool
+view) and the `PreviewWidget` constructor, *before* it creates its own
+profile (covers the tests, which drive the widget without the plugin, and the
+lazy modes where the engine starts on first open). Best effort: if another
+plugin already started the engine, the flag arrives too late.
+- **Explicit `--js-flags` in the user's env wins.** Chromium reads the first
+`--js-flags` switch, so appending a second one would be silently dropped and
+the setting would look active without being. `applyV8HeapCap()` therefore
+refuses to touch the env when it already contains `--js-flags`; 0 (the
+setting's "off") leaves the env alone entirely.
+- **Reading happens once per process:** a setting change needs a Kate restart
+(config page says so), unless the engine has not started yet.
+
+Measured behavior (Qt 6.11 / Chromium 140, offscreen probe, renderer RSS
+alone — the two static ~88 MB helper processes are constant and excluded;
+fresh renderer baseline ~172 MB):
+
+| Document | No cap | Cap 128 | Cap 64 |
+|---|---|---|---|
+| typical (10 kB, 80 math), 8 re-renders | 172→443 MB, still +29 MB/render; ~100 ms | plateau ~420 MB; ~100 ms (free) | plateau ~291 MB; ~110 ms |
+| stress (90 kB, 700 math), 8 re-renders | 172→2231 MB, +256 MB/render; ~0.8 s/render | plateau ~600 MB; ~3.0 s/render | plateau ~570 MB; ~3.0 s/render |
+| text-only 90 kB churn | unbounded until recycle | ≈ no cap (see below) | — |
+
+Two measured consequences shape the rules above:
+
+- **The guard is invisible while a render fits under the cap and costs GC
+time when it does not.** A document whose per-render working set exceeds the
+cap makes V8 collect *during* the build — the stress row above goes from
+0.8 s to ~3.0 s per render. That is the trade-off the configurable setting
+(and "off") exists for; the plateau, not the render time, is what a low cap
+buys on such documents.
+- **The guard is not a substitute for the recycle.** On text-only churn of
+the ~100 kB documents the maintenance was calibrated on, a 128 MB cap changes
+almost nothing (that growth is not old-space-dominated), and nothing but
+process death reclaims decoded images. Recycle stays the primary bound; a
+binding cap merely makes real growth smaller than the estimate, so the
+recycle may fire a little early — harmless, never late.
+- `--enable-features=PartitionAllocMemoryReclaimer` and
+`PartitionAllocLazyCommit` measured no effect on this workload in Chromium
+140 (already the defaults there); do not resurrect them without re-measuring.
+
 ### 5. Reloadless document switches (`attachDocument` fast path)
 
 Every document switch used to be a full `setHtml` navigation — re-executing
@@ -299,6 +355,19 @@ A doc that outgrows the page's engine set still triggers the one-time rebuild
     once per second while the open document can contain images; the delta is
     charged against the estimate, so an image-heavy reading session recycles
     instead of accreting decoded frames the renderer never returns.
+14. **The JS heap cap is additive and only ever lowers memory.** It must never
+    be promoted into a substitute for the recycle (it neither bounds text-only
+    churn nor decoded images), so the estimate, its calibration and the
+    recycle triggers stay as they are. A binding cap makes real growth smaller
+    than the estimate charges; a slightly-early recycle is fine, a late one is
+    not.
+15. **The cap reaches Chromium only through the env, before the engine
+    starts, and never over an explicit `--js-flags`.** Merging happens from
+    the plugin and the `PreviewWidget` constructor before its own profile
+    exists; both are idempotent and skip when the env already carries
+    `--js-flags` (a second switch would be silently dropped — the setting must
+    not look active without being). `KATEXDOWN_V8_CAP_MB` (an env int,
+    0 disables) overrides the stored setting for scripts and tests.
 
 ## Pitfalls (each already cost a debugging session)
 
@@ -354,6 +423,17 @@ A doc that outgrows the page's engine set still triggers the one-time rebuild
   elements, re-built on every keystroke. The fence-size cap above is what
   stops it — do not "fix" this by silently dropping oversized fences (the
   text must always render) or by removing the cap.
+- **A second `--js-flags` is silently ignored.** Chromium keeps the first
+  `--js-flags` switch, so merging a second one (e.g. appending our cap to an
+  env that already has `--js-flags=--expose-gc`) would *look* applied without
+  ever taking effect. The merge refuses instead (Invariant 15); envflagstest
+  pins the refusal.
+- **Flags are read at engine start, not at widget creation.** QtWebEngine
+  consumes `QTWEBENGINE_CHROMIUM_FLAGS` once per process, at its first
+  profile/page/view. Applying the cap in the plugin constructor is
+  best-effort: it only works when nothing else started the engine first, and
+  changing the setting never affects an already-running session — the config
+  page tells the user to restart Kate.
 - **"The renderer never returns memory" is the default, not a bug report.**
   QtWebEngine keeps a long-lived renderer's dead memory forever (measured:
   tens of MB per full re-render of a large document, unbounded growth, no
@@ -394,7 +474,11 @@ A doc that outgrows the page's engine set still triggers the one-time rebuild
   sets a flat per-decode image charge (deterministic for tests), and
   `KATEXDOWN_MEM_OFF=1`
   disables the policy ticker so tests can drive `performMemoryRecycle()`
-  directly. RSS is measured in tests by walking `/proc` for the test process'
+  directly; `KATEXDOWN_V8_CAP_MB` overrides the JS heap cap setting (an int in
+  MB, 0 = off; the tests' env also sets `QTWEBENGINE_CHROMIUM_FLAGS` and the
+  `PreviewWidget` constructor merges the configured cap on top of it, so every
+  engine test runs with production's 128 MB default). RSS is measured in tests
+  by walking `/proc` for the test process'
   QtWebEngine descendants (Linux; the RSS tests skip elsewhere). Note that
   the policy refuses to recycle a *focused* preview, and the offscreen test
   harness focuses the shown widget — tests that exercise `idleTick` drop the
@@ -438,6 +522,11 @@ A doc that outgrows the page's engine set still triggers the one-time rebuild
     real image decodes (flat charge via `KATEXDOWN_MEM_IMG_CHARGE_MB`) push
     the estimate over the budget and trigger the recycle, and images decode
     again on the fresh page without a stranded failure state.
+  - `envflagstest` (no web engine) — Invariant 15 and the delivery rules of
+    the JS heap guard: the cap is appended when the env is empty or carries
+    non-js-flags, an explicit `--js-flags` in the env always wins, cap 0 and
+    `KATEXDOWN_V8_CAP_MB=0` leave the env untouched, and the env override
+    beats the stored value while an unparsable override falls back to it.
 - Tests run headless: `QT_QPA_PLATFORM=offscreen`, `--disable-gpu
   --no-sandbox`, and they show + resize the preview because IntersectionObserver
   callbacks are driven by compositor frames.
@@ -465,3 +554,8 @@ A doc that outgrows the page's engine set still triggers the one-time rebuild
   `render()`/`handleDecodeStats`; the decode counter lives in
   `data/js/preview.js` (`__kdxDecodeStats`);
   tests in `tests/rendermemorytest.cpp`.
+- JS heap guard: `src/kdxchromiumflags.h` (env merge + override helper),
+  applied from `src/plugin.cpp` (plugin ctor) and `src/previewwidget.cpp`
+  (ctor, before its profile); setting + config UI in `src/settings.{h,cpp}`
+  (`V8HeapCapMb`) and `src/configpage.{h,cpp}` ("JS memory cap", 0–1024 MB);
+  tests in `tests/envflagstest.cpp`.

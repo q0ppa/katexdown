@@ -56,6 +56,12 @@ public:
         Adaptive = 1,
         MemorySaver = 2,
     };
+    // V8 old-space cap for the preview's renderer, in MB (see
+    // design/lazyrender.md, "JS heap guard"). 128 MB is the default: it is
+    // invisible for documents whose per-render working set stays under it and
+    // bounds the unbounded per-render growth of large-document sessions. 0
+    // disables the cap (Chromium's own, effectively unbounded, default).
+    static constexpr int DefaultV8HeapCapMb = 128;
 
     static Settings *self();
 
@@ -77,6 +83,12 @@ public:
     {
         return m_imageMode;
     }
+    // Renderer JS heap cap in MB, 0 = off. Only read at web-engine start
+    // (see kdxchromiumflags.h); a change needs a Kate restart to take effect.
+    int v8HeapCapMb() const
+    {
+        return m_v8HeapCapMb;
+    }
     QStringList customCssFiles() const
     {
         return m_customCssFiles;
@@ -94,6 +106,7 @@ public:
     void setUseGithubCss(bool enabled);
     void setLoadingMode(LoadingMode mode);
     void setImageMode(ImageMode mode);
+    void setV8HeapCapMb(int mb);
     void setCustomCssFiles(const QStringList &files);
     void setTocLevels(const QList<int> &levels);
 
@@ -115,6 +128,9 @@ private:
     LoadingMode m_loadingMode = LazyKeep;
     // Image decode policy; Auto by default (see enum above).
     ImageMode m_imageMode = Adaptive;
+    // V8 old-space cap in MB applied to the preview's renderer process via
+    // QTWEBENGINE_CHROMIUM_FLAGS (see kdxchromiumflags.h). 0 disables it.
+    int m_v8HeapCapMb = DefaultV8HeapCapMb;
     // Custom stylesheets applied after the bundled github-markdown.css, in
     // listed order (later files win). Relative paths resolve against the
     // Katexdown data dir (see katexdownpaths.h).
