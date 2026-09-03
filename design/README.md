@@ -38,3 +38,4 @@ invariants a change must not break, and which pitfalls already cost us.
 | Doc | Topic |
 |-----|-------|
 | [lazyrender.md](lazyrender.md) | Preview loading & renderer memory: page lifetime (freeze/discard), per-document engine gating, image decode modes and the parking machinery, plus the renderer-memory maintenance (recycle) that bounds a long-session renderer |
+| [fragments.md](fragments.md) | Fragment links: heading anchor ids (GitHub slug rules, every level), and how a clicked `doc.md#section` link makes the preview jump to that section |

@@ -199,6 +199,8 @@ private Q_SLOTS:
     void memoryStaysBoundedAcrossDocumentSwitches();
     void maintenanceRecycleFreesMemoryAndKeepsThePage();
     void imagesSurviveMaintenanceRecycle();
+    void idleOpenDocumentDoesNotRecycleInALoop();
+    void imageDecodesChargeTheRecycleBudget();
 };
 
 // Switching among several markdown tabs must not grow the renderer without
@@ -389,6 +391,224 @@ void RenderMemoryTest::imagesSurviveMaintenanceRecycle()
     QVERIFY2(waitForImageWidth(preview.get(), ImageWidth),
              qPrintable(QStringLiteral("image did not decode again after the recycle, naturalWidth=%1").arg(imageWidth(preview.get()))));
 
+    const QString failed = evalJs(preview.get(), QStringLiteral("document.images[0].dataset.kdxFailed || 'ok'"));
+    QCOMPARE(failed, QStringLiteral("ok"));
+
+    delete doc;
+}
+
+// The maintenance estimate counts the dead memory a render leaves behind when
+// it *replaces* already-rendered content. A fresh page's own first render
+// replaces nothing, so it must not be charged — otherwise any document whose
+// text charge exceeds the budget would be "due" forever and the open preview
+// would recycle itself in an endless loop (~every 7 s, measured). This pins:
+// first open of a large document stays put while idle; one edit recycles once;
+// and the fresh page after that recycle stays put again (no loop).
+void RenderMemoryTest::idleOpenDocumentDoesNotRecycleInALoop()
+{
+    if (!procAvailable()) {
+        QSKIP("renderer RSS is read from /proc (Linux only)");
+    }
+    qputenv("KATEXDOWN_MEM_BUDGET_MB", "16"); // below the ~46 MB text charge of bigText
+    qputenv("KATEXDOWN_MEM_IDLE_MS", "800");
+    qunsetenv("KATEXDOWN_MEM_OFF");
+    qunsetenv("KATEXDOWN_MEM_IMG_CHARGE_MB");
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString path = dir.filePath(QStringLiteral("doc.md"));
+    QFile f(path);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    QVERIFY(f.write(bigText(QStringLiteral("loop0")).toUtf8()) > 0);
+    f.close();
+    KTextEditor::Document *doc = KTextEditor::Editor::instance()->createDocument(nullptr);
+    QVERIFY(doc->openUrl(QUrl::fromLocalFile(path)));
+    QTRY_VERIFY(doc->text().size() > 1000);
+
+    auto preview = std::make_unique<PreviewWidget>(nullptr, nullptr, doc);
+    preview->resize(700, 500);
+    preview->show();
+    QVERIFY(waitForText(preview.get(), QLatin1String("loop0")));
+    // Production-like: in Kate the editor holds focus, never the preview. The
+    // offscreen test harness activates the shown window and focuses the web
+    // view (and its internal render widget), so drop the focus again — the
+    // maintenance policy refuses to recycle a focused preview.
+    {
+        auto *view = preview->findChild<QWebEngineView *>();
+        view->clearFocus();
+        if (view->focusProxy()) {
+            view->focusProxy()->clearFocus();
+        }
+        QTRY_VERIFY_WITH_TIMEOUT(QApplication::focusWidget() == nullptr, 5000);
+    }
+    const QSet<long> baselinePids = [&]() {
+        QSet<long> pids;
+        for (const auto &c : engineChildren()) {
+            pids.insert(c.first);
+        }
+        return pids;
+    }();
+
+    // Phase 1: an idle open preview of a large document must NOT recycle (the
+    // first render is uncharged). The old code recycled roughly every 7 s here.
+    QTest::qWait(12000);
+    const QSet<long> pids1 = [&]() {
+        QSet<long> pids;
+        for (const auto &c : engineChildren()) {
+            pids.insert(c.first);
+        }
+        return pids;
+    }();
+    QVERIFY2(pids1 == baselinePids,
+             "idle open preview of a large document recycled without any churn (loop?)");
+
+    // Phase 2: one real edit dirties the renderer (content replacement), the
+    // budget is crossed, and the maintenance recycles exactly once...
+    doc->setText(bigText(QStringLiteral("loop1")));
+    QVERIFY(waitForText(preview.get(), QLatin1String("loop1")));
+    bool recycled = false;
+    {
+        QDeadlineTimer deadline(20000);
+        while (!deadline.hasExpired()) {
+            const QSet<long> now = [&]() {
+                QSet<long> pids;
+                for (const auto &c : engineChildren()) {
+                    pids.insert(c.first);
+                }
+                return pids;
+            }();
+            if (now != baselinePids) {
+                recycled = true;
+                break;
+            }
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
+        }
+    }
+    QVERIFY2(recycled, "the edit did not trigger the maintenance recycle");
+    QVERIFY(waitForText(preview.get(), QLatin1String("loop1")));
+
+    // ...and then it stops: the recycle's own fresh render is uncharged, so no
+    // endless loop follows. The old code changed renderer pids again within a
+    // few seconds of the previous recycle.
+    const QSet<long> afterRecycle = [&]() {
+        QSet<long> pids;
+        for (const auto &c : engineChildren()) {
+            pids.insert(c.first);
+        }
+        return pids;
+    }();
+    QTest::qWait(12000);
+    const QSet<long> pids2 = [&]() {
+        QSet<long> pids;
+        for (const auto &c : engineChildren()) {
+            pids.insert(c.first);
+        }
+        return pids;
+    }();
+    QVERIFY2(pids2 == afterRecycle,
+             "the preview kept recycling after the maintenance cycle (estimate not reset?)");
+
+    delete doc;
+}
+
+// Image decodes are invisible to the text-based estimate, yet Chromium keeps
+// a share of every decoded frame it will never return (measured ~8-10 MB per
+// photo scrolled past, in every image mode). The 1 Hz decode poll must charge
+// those decodes so an image-heavy session recycles instead of accreting
+// without bound. KATEXDOWN_MEM_IMG_CHARGE_MB makes the charge deterministic.
+void RenderMemoryTest::imageDecodesChargeTheRecycleBudget()
+{
+    if (!procAvailable()) {
+        QSKIP("renderer RSS is read from /proc (Linux only)");
+    }
+    qputenv("KATEXDOWN_MEM_BUDGET_MB", "16"); // 4 (fixed load) + 3 x 4 (flat charge) crosses it
+    qputenv("KATEXDOWN_MEM_IDLE_MS", "800");
+    qputenv("KATEXDOWN_MEM_IMG_CHARGE_MB", "4");
+    qunsetenv("KATEXDOWN_MEM_OFF");
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QString md = QStringLiteral("# imgs\n\n");
+    for (int i = 0; i < 4; ++i) {
+        QFile png(dir.filePath(QStringLiteral("r%1.png").arg(i)));
+        QVERIFY(png.open(QIODevice::WriteOnly));
+        QCOMPARE(png.write(RedPng), RedPng.size());
+        png.close();
+        md += QStringLiteral("![img %1](r%1.png)\n\n").arg(i);
+    }
+    md += QStringLiteral("some body.\n");
+    const QString path = dir.filePath(QStringLiteral("doc.md"));
+    QFile f(path);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    QVERIFY(f.write(md.toUtf8()) > 0);
+    f.close();
+    KTextEditor::Document *doc = KTextEditor::Editor::instance()->createDocument(nullptr);
+    QVERIFY(doc->openUrl(QUrl::fromLocalFile(path)));
+    QTRY_VERIFY(doc->text().size() > 0);
+
+    auto preview = std::make_unique<PreviewWidget>(nullptr, nullptr, doc);
+    preview->resize(700, 500);
+    preview->show();
+    QVERIFY(waitForText(preview.get(), QLatin1String("imgs")));
+    QVERIFY(waitForImageWidth(preview.get(), ImageWidth));
+    {
+        auto *view = preview->findChild<QWebEngineView *>();
+        view->clearFocus();
+        if (view->focusProxy()) {
+            view->focusProxy()->clearFocus();
+        }
+        QTRY_VERIFY_WITH_TIMEOUT(QApplication::focusWidget() == nullptr, 5000);
+    }
+
+    // The images at the top decode right away; wait until the page reports at
+    // least three real decodes (naturalWidth > 1, placeholders excluded).
+    {
+        QDeadlineTimer deadline(15000);
+        bool counted = false;
+        while (!deadline.hasExpired()) {
+            const QString stats = evalJs(preview.get(), QStringLiteral("window.__kdxDecodeStats ? window.__kdxDecodeStats() : '0:0'"));
+            const int colon = stats.indexOf(QLatin1Char(':'));
+            if (colon > 0 && stats.left(colon).toInt() >= 3) {
+                counted = true;
+                break;
+            }
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
+        }
+        QVERIFY2(counted, "the page never reported the image decodes");
+    }
+
+    // The decode charges push the estimate over the budget; the maintenance
+    // recycles (a new renderer process appears) and the images decode again
+    // on the fresh page, with no stranded failure state.
+    const QSet<long> baselinePids = [&]() {
+        QSet<long> pids;
+        for (const auto &c : engineChildren()) {
+            pids.insert(c.first);
+        }
+        return pids;
+    }();
+    {
+        QDeadlineTimer deadline(20000);
+        bool recycled = false;
+        while (!deadline.hasExpired()) {
+            const QSet<long> now = [&]() {
+                QSet<long> pids;
+                for (const auto &c : engineChildren()) {
+                    pids.insert(c.first);
+                }
+                return pids;
+            }();
+            if (now != baselinePids) {
+                recycled = true;
+                break;
+            }
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
+        }
+        QVERIFY2(recycled, "image decodes never triggered the maintenance recycle");
+    }
+
+    QVERIFY(waitForText(preview.get(), QLatin1String("imgs")));
+    QVERIFY(waitForImageWidth(preview.get(), ImageWidth));
     const QString failed = evalJs(preview.get(), QStringLiteral("document.images[0].dataset.kdxFailed || 'ok'"));
     QCOMPARE(failed, QStringLiteral("ok"));
 

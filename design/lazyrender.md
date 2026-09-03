@@ -89,6 +89,20 @@ Rules:
 - An engine a document *stops* needing only leaves on the next full load
   (document switch or rebuild), never mid-page.
 
+### Fence-size cap (highlight output)
+
+Engine gating decides *whether* highlight.js is on the page; the cap decides
+*how much of one fence it may tokenize*. highlight.js turns each token into a
+`<span>`, so a single oversized fence (a minified bundle or a dump pasted
+wholesale — extremely rare) would otherwise build tens of thousands of DOM
+elements in one block and re-tokenize them on every keystroke. `preview.js`
+therefore treats any fence longer than `kdxHljsMaxChars` (50 000, exposed on
+`window` for tests) as plain code: same `<pre>` box, same text (HTML-
+escaped), no token spans — only the syntax colors are lost. Normal fences are
+unaffected, and engine gating is unchanged (a document still loads highlight.js
+when any fence exists, because a doc can outgrow an oversized fence into a
+normal one on the next edit).
+
 ### 3. Image decode policy (Settings::ImageMode, `data/js/preview.js`, `data/css/base.css`)
 
 Mirrored in the page through `__setImageMode('eager' | 'auto' | 'saver')`
@@ -173,16 +187,41 @@ Two trigger points, both invisible by construction:
   restored after the fresh load, so a paused reader sees nothing change.
 
 The trigger is an **estimate**, not an RSS measurement (portable): every full
-page load adds a fixed cost (re-executing the inlined engines) and every
-full-document markdown push adds `text size × factor`, with the factor
-calibrated from the measurements above (defaults in `readMemTuning()`;
-tunable per process via `KATEXDOWN_MEM_BUDGET_MB`, `KATEXDOWN_MEM_IDLE_MS`,
-`KATEXDOWN_MEM_MAX_AGE_MS`, `KATEXDOWN_MEM_OFF=1`). The estimate over- rather
-than under-counts, so real memory stays under the budget even where the real
-leak ratio is higher than measured. A discard (or a closed-panel freeze, which
+page load adds a fixed cost (re-executing the inlined engines), every
+full-document markdown push that *replaces already-rendered content* adds
+`text size × factor`, and every real image decode adds a charge (see below),
+with the factors calibrated from the measurements above (defaults in
+`readMemTuning()`; tunable per process via `KATEXDOWN_MEM_BUDGET_MB`,
+`KATEXDOWN_MEM_IDLE_MS`, `KATEXDOWN_MEM_MAX_AGE_MS`, `KATEXDOWN_MEM_OFF=1`, and
+for tests `KATEXDOWN_MEM_IMG_CHARGE_MB`). The estimate over- rather than
+under-counts, so real memory stays under the budget even where the real leak
+ratio is higher than measured. A discard (or a closed-panel freeze, which
 *is* a purge) resets the estimate — that is the "since the last purge" book-
 keeping. A 5 s safety timer aborts any recycle that does not complete, so the
 preview can never stay hidden.
+
+**A page's first render is not charged.** The dead memory the estimate counts
+is what a render leaves behind when it *replaces* content that was already on
+the page. The very first render of a page — first open, or the fresh page of
+a maintenance recycle — replaces nothing, so charging it text × factor would
+keep any document whose text charge exceeds the budget permanently "due";
+the open preview would then recycle itself in an endless loop (measured:
+a fresh renderer process every ~7 s for an idle 1 MB text document).
+`m_renderedOnce` (reset when a discard kills the renderer) is the gate.
+
+**Image decodes are charged too.** Scrolling past an image decodes it (at
+viewport quality) and the renderer keeps a share of that decoded frame it
+will never return on its own — measured at ~8-10 MB per photo scrolled past,
+in *every* image mode, sticky over 50+ s of idle, invisible to a text-only
+estimate because it arrives without any render or navigation. The page
+counts every real decode (`window.__kdxDecodeStats` in preview.js — a load
+with `naturalWidth > 1`, so the 1x1 parking placeholder and failed loads
+excluded) and the host polls it once per second while an image-bearing
+document is open (`idleTick`/`handleDecodeStats`, gated by a cheap `![`/`<img`
+text scan). Each new decode is charged min(intrinsic bytes, 8 MiB) — capped
+so a grid of small images stays cheap — or a flat amount when
+`KATEXDOWN_MEM_IMG_CHARGE_MB` is set. A photo-browsing session therefore
+recycles at the next quiet moment instead of accreting without bound.
 
 ### 5. Reloadless document switches (`attachDocument` fast path)
 
@@ -242,8 +281,35 @@ A doc that outgrows the page's engine set still triggers the one-time rebuild
 10. **A page only ever re-renders a same-folder switch in place** (Section 5)
     when it is loaded, the panel is open, nothing is pending, and the new text
     needs no engine the page lacks; any other switch is a full load.
+11. **A fence above `kdxHljsMaxChars` renders plain.** It is never fed to
+    highlight.js; its content is HTML-escaped into the same `<pre>` it would
+    otherwise get, so the block's box, text and export output are identical
+    except for the missing token spans/colors. Raising the cap (or removing
+    it) without re-checking renderer memory re-opens the span-factory pitfall
+    below.
+12. **A page's first render is never charged to the estimate.** Only renders
+    that replace already-rendered content leave the dead memory the estimate
+    counts; charging a fresh page's own first render (first open, or a
+    recycle's fresh load) would keep any large document permanently "due" and
+    recycle the open preview in an endless loop. `m_renderedOnce` is the gate,
+    reset together with the estimate when a discard kills the renderer.
+13. **Every real image decode is charged exactly once.** The page counts a
+    decode as an `<img>` load with `naturalWidth > 1` (the 1×1 parking
+    placeholder and failed loads never count), and the host polls the counter
+    once per second while the open document can contain images; the delta is
+    charged against the estimate, so an image-heavy reading session recycles
+    instead of accreting decoded frames the renderer never returns.
 
 ## Pitfalls (each already cost a debugging session)
+
+- **Image browsing accretes memory the text estimate cannot see.** Scrolling
+  past a photo decodes it, and Chromium keeps a share of every decoded frame:
+  measured ~8-10 MB per photo scrolled past, in every image mode, sticky for
+  50+ s of idle, and produced without any render or navigation — so a
+  text-only estimator never fires. The decode poll (Invariant 13) exists for
+  this; do not "fix" it by removing the charge (back to unbounded accretion)
+  or by parking harder (parking already caps the *simultaneously decoded* set;
+  the retention is the renderer's, not the `<img>` elements').
 
 - **The "1×1 dot" bug.** Images parked *before their first decode* (below the
   fold) had the parking placeholder's own dimensions recorded as their box:
@@ -283,6 +349,11 @@ A doc that outgrows the page's engine set still triggers the one-time rebuild
   the freshest text (document switches can arrive before the first render),
   which is why `render()`/`loadPage()`/`exportToFile()` refresh `m_text` from
   the document before scanning.
+- **A giant fence is a span factory.** Tokenizing turns every token into a
+  `<span>`; a single pasted minified bundle can mean tens of thousands of DOM
+  elements, re-built on every keystroke. The fence-size cap above is what
+  stops it — do not "fix" this by silently dropping oversized fences (the
+  text must always render) or by removing the cap.
 - **"The renderer never returns memory" is the default, not a bug report.**
   QtWebEngine keeps a long-lived renderer's dead memory forever (measured:
   tens of MB per full re-render of a large document, unbounded growth, no
@@ -319,16 +390,27 @@ A doc that outgrows the page's engine set still triggers the one-time rebuild
   `KATEXDOWN_DATA_DIR` points at a fake asset dir (used to fake KaTeX assets
   so engine-gating tests need no downloaded data);
   `KATEXDOWN_MEM_BUDGET_MB`/`KATEXDOWN_MEM_IDLE_MS`/`KATEXDOWN_MEM_MAX_AGE_MS`
-  shorten the recycle budget and quiet window, and `KATEXDOWN_MEM_OFF=1`
+  shorten the recycle budget and quiet window, `KATEXDOWN_MEM_IMG_CHARGE_MB`
+  sets a flat per-decode image charge (deterministic for tests), and
+  `KATEXDOWN_MEM_OFF=1`
   disables the policy ticker so tests can drive `performMemoryRecycle()`
   directly. RSS is measured in tests by walking `/proc` for the test process'
-  QtWebEngine descendants (Linux; the RSS tests skip elsewhere).
+  QtWebEngine descendants (Linux; the RSS tests skip elsewhere). Note that
+  the policy refuses to recycle a *focused* preview, and the offscreen test
+  harness focuses the shown widget — tests that exercise `idleTick` drop the
+  focus again (`clearFocus` on the view and its focus proxy) to mirror Kate,
+  where the editor holds focus.
 - Which test pins which invariant:
   - `followmodetest::keptModesFreezeAndReleaseWhileClosed` — lifecycle state
     machine (Active → Frozen → Discarded → reload → Active; Eager never
     discards).
   - `renderfeaturestest::enginesAreLoadedOnlyWhenTheTextNeedsThem` —
     Invariant 4, including the one-time rebuild on growing text.
+  - `renderfeaturestest::oversizedFenceRendersPlain` — Invariant 11: the cap
+    is read from `window.kdxHljsMaxChars` (the page is the single source of
+    truth); an oversized fence keeps its exact text, its `<pre>` box and its
+    HTML escaping but renders zero token spans, while a normal fence in the
+    same document still highlights.
   - `renderfeaturestest::imageModesControlDecoding` — the three modes, the
     park/restore cycle, and export normalization (Invariant 5).
   - `renderfeaturestest::parkingPreservesTheImageBox` — Invariant 1 (below-the-
@@ -348,6 +430,14 @@ A doc that outgrows the page's engine set still triggers the one-time rebuild
   - `rendermemorytest::imagesSurviveMaintenanceRecycle` — a relative image
     still decodes after a recycle (the fresh load re-applies the local-file
     guard) with no stranded failure state.
+  - `rendermemorytest::idleOpenDocumentDoesNotRecycleInALoop` — Invariant 12:
+    an idle open preview of a document whose text charge exceeds the budget
+    stays put (no churn, no loop); one edit recycles exactly once and the
+    fresh page settles again.
+  - `rendermemorytest::imageDecodesChargeTheRecycleBudget` — Invariant 13:
+    real image decodes (flat charge via `KATEXDOWN_MEM_IMG_CHARGE_MB`) push
+    the estimate over the budget and trigger the recycle, and images decode
+    again on the fresh page without a stranded failure state.
 - Tests run headless: `QT_QPA_PLATFORM=offscreen`, `--disable-gpu
   --no-sandbox`, and they show + resize the preview because IntersectionObserver
   callbacks are driven by compositor frames.
@@ -358,13 +448,20 @@ A doc that outgrows the page's engine set still triggers the one-time rebuild
   `idleTick`, lifecycle-state callback), `src/pluginview.{h,cpp}` (mode
   decisions), `src/settings.{h,cpp}` (the two mode enums).
 - Engine gating: `src/previewwidget.cpp` (`enginesForText`, `buildHtml(int)`,
-  the rebuild checks in `render()`/`exportToFile()`).
+  the rebuild checks in `render()`/`exportToFile()`); fence-size cap:
+  `data/js/preview.js` (the `highlight` option of the markdown-it instance,
+  `kdxHljsMaxChars`).
 - Image policy: `data/js/preview.js` (image section: `armImages`, `swapOut`,
   `swapIn`, `recordDims`, `onImgLoad/onImgError`, `__setImageMode`,
   `__serializedHtml`), `data/css/base.css` (the `data-pv-imgmode` height rule).
 - Renderer-memory maintenance: `src/previewwidget.{h,cpp}` (`idleTick` open-
-  panel branch, `performMemoryRecycle`/`beginRecycle`/`finalizeRecycle`/
-  `abortRecycle`, the lifecycle-state handler's discard/frozen branches,
+  panel branch incl. the 1 Hz decode poll, `handleDecodeStats`,
+  `performMemoryRecycle`/`beginRecycle`/`finalizeRecycle`/
+  `abortRecycle`, the lifecycle-state handler's discard/frozen branches
+  (resets `m_renderedOnce` and the decode bookkeeping),
   `noteRenderWork`/`noteActivity`/`recycleDue`/`recycleIdle`,
-  `readMemTuning`, the `attachDocument` recycle + same-folder fast path);
+  `readMemTuning`, the `attachDocument` recycle + same-folder fast path),
+  the first-render gate (`m_renderedOnce`) and the image-charge constants in
+  `render()`/`handleDecodeStats`; the decode counter lives in
+  `data/js/preview.js` (`__kdxDecodeStats`);
   tests in `tests/rendermemorytest.cpp`.

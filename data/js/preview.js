@@ -7,6 +7,7 @@
 //   __setColorScheme(dark)   set color-scheme + data attribute on <html>
 //   __setImageMode(mode)     image decode policy: 'eager' | 'auto' | 'saver'
 //                            (see the image-mode section below)
+//   __scrollToFragment(frag) jump to the section a "#slug" fragment names
 //   __serializedHtml()       outerHTML with the image machinery normalized
 //                            away (real srcs, no lazy/placeholder state) —
 //                            what export serializes
@@ -21,6 +22,45 @@
       .replace(/>/g, "&gt;");
   }
 
+  // Real-decode counter for the host's renderer-memory maintenance (see
+  // previewwidget.cpp / idleTick): Chromium keeps a share of every image frame
+  // this page ever decoded, and nothing in the page can make it give that
+  // back — so the host polls __kdxDecodeStats() and charges its dead-memory
+  // estimate per decode, making an image-heavy reading session recycle (fresh
+  // renderer) like a text-heavy one. One event per real frame decode: a load
+  // with naturalWidth > 1 (the 1x1 parking placeholder never counts, failed
+  // loads have naturalWidth 0). The byte figure is a conservative upper bound
+  // of a single decode's footprint, capped so a grid of small images stays
+  // cheap instead of charging like a full-screen photo.
+  var kdxDecodeCount = 0;
+  var kdxDecodeBytes = 0;
+  document.addEventListener(
+    "load",
+    function (e) {
+      var t = e.target;
+      if (!t || t.tagName !== "IMG" || t.naturalWidth <= 1) {
+        return;
+      }
+      kdxDecodeCount += 1;
+      kdxDecodeBytes += Math.min(t.naturalWidth * t.naturalHeight * 4, 8388608);
+    },
+    true
+  );
+  window.__kdxDecodeStats = function () {
+    return kdxDecodeCount + ":" + kdxDecodeBytes;
+  };
+
+  // A code fence larger than this many characters is rendered as plain
+  // escaped text instead of being tokenized by highlight.js. Tokenizing turns
+  // every token into a <span>, so an oversized fence (a minified bundle or a
+  // dump pasted wholesale — extremely rare) would otherwise build tens of
+  // thousands of DOM elements for a single block, and re-tokenize on every
+  // keystroke. Above the cap the block keeps its <pre> box and its text
+  // (only the syntax colors are lost). Exposed on window so tests can build
+  // a fence that crosses the threshold exactly.
+  var kdxHljsMaxChars = 50000;
+  window.kdxHljsMaxChars = kdxHljsMaxChars;
+
   var md = window.markdownit({
     html: true,
     linkify: true,
@@ -29,20 +69,23 @@
     highlight: function (str, lang) {
       var hljs = window.hljs;
       var body;
-      if (hljs && lang && hljs.getLanguage(lang)) {
+      if (!hljs || str.length > kdxHljsMaxChars) {
+        // No highlighter on the page, or the fence is too large to tokenize:
+        // escape it as-is so the block still renders inside its <pre> box
+        // (only the syntax colors are lost, and no span DOM is built).
+        body = escapeHtml(str);
+      } else if (lang && hljs.getLanguage(lang)) {
         try {
           body = hljs.highlight(str, { language: lang, ignoreIllegals: true }).value;
         } catch (e) {
           body = escapeHtml(str);
         }
-      } else if (hljs) {
+      } else {
         try {
           body = hljs.highlightAuto(str).value;
         } catch (e) {
           body = escapeHtml(str);
         }
-      } else {
-        body = escapeHtml(str);
       }
       return '<pre class="hljs"><code>' + body + "</code></pre>";
     },
@@ -568,7 +611,9 @@
   var outlineBtn = null;
   var outlinePanel = null;
   var outlineList = null;
-  var outlineTakenIds = {};
+  // Null-prototype maps so a heading slug like "constructor" or "toString"
+  // cannot collide with Object.prototype keys while counting duplicates.
+  var outlineTakenIds = Object.create(null);
 
   function ensureOutlineUi() {
     if (outlineBtn) {
@@ -618,29 +663,39 @@
     return (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
   }
 
-  // GitHub-style slug: lowercase, punctuation collapses to dashes. Unicode
-  // letters (e.g. Chinese headings) are kept.
+  // GitHub-style heading slug — the format markdown authors write fragment
+  // links against ("[install](#installation)"). GitHub lowercases, drops
+  // punctuation outright (an em dash vanishes, it does not become a dash)
+  // while keeping letters, numbers, "_" and "-", and maps each space to one
+  // hyphen without collapsing runs: "Chapter 2 — Getting Started" becomes
+  // "chapter-2--getting-started". Unicode letters (e.g. Chinese headings)
+  // stay; inline markup contributes its visible text ("*Notes*" -> "notes").
   function outlineSlug(text) {
-    return (
-      text
-        .toLowerCase()
-        .replace(/[^\p{L}\p{N}]+/gu, "-")
-        .replace(/^-+|-+$/g, "") || "section"
-    );
+    var slug = text
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}\p{M}_\- ]/gu, "") // drop punctuation, keep words
+      .trim();
+    return slug.replace(/ /g, "-") || "section";
   }
 
+  // Unique heading id, numbered like GitHub's: the first heading with a given
+  // slug keeps it, the second becomes "<slug>-1", the third "<slug>-2", ...
+  // The count starts past any id already in the document, so a heading with a
+  // raw authored id (e.g. <h2 id="x">) never collides with one.
   function outlineUniqueId(text) {
     var base = outlineSlug(text);
-    if (!outlineTakenIds[base] && !document.getElementById(base)) {
-      outlineTakenIds[base] = true;
+    var n = outlineTakenIds[base] || (document.getElementById(base) ? 1 : 0);
+    if (n === 0) {
+      outlineTakenIds[base] = 1;
       return base;
     }
-    var n = 2;
-    while (outlineTakenIds[base + "-" + n] || document.getElementById(base + "-" + n)) {
+    var id;
+    do {
+      id = base + "-" + n;
       n += 1;
-    }
-    outlineTakenIds[base + "-" + n] = true;
-    return base + "-" + n;
+    } while (document.getElementById(id));
+    outlineTakenIds[base] = n;
+    return id;
   }
 
   function setOutlineOpen(open) {
@@ -651,18 +706,24 @@
     outlineBtn.setAttribute("aria-expanded", open ? "true" : "false");
   }
 
-  function jumpToSection(el) {
-    el.scrollIntoView({ behavior: "smooth", block: "start" });
-    // Restart the flash animation on the heading we just landed on.
+  // (Re)start the flash animation on the heading we just landed on.
+  function flashHeading(el) {
     el.classList.remove("kdx-outline-jumped");
     void el.offsetWidth;
     el.classList.add("kdx-outline-jumped");
+  }
+
+  function jumpToSection(el) {
+    el.scrollIntoView({ behavior: "smooth", block: "start" });
+    flashHeading(el);
     setOutlineOpen(false);
   }
 
   function rebuildOutline() {
     ensureOutlineUi();
-    outlineTakenIds = {};
+    // Null-prototype map: a heading slug must not collide with
+    // Object.prototype keys while numbering duplicates (see the declaration).
+    outlineTakenIds = Object.create(null);
     var content = document.getElementById("content");
     var items = [];
     if (content) {
@@ -670,17 +731,18 @@
       for (var i = 0; i < headings.length; i++) {
         var el = headings[i];
         var level = parseInt(el.tagName.charAt(1), 10);
-        if (outlineLevels.indexOf(level) < 0) {
-          continue;
-        }
         var text = outlineHeadingText(el);
         if (!text) {
           continue;
         }
-        // Anchor id (kept when the heading already has one, e.g. raw HTML)
-        // so in-page "#slug" links resolve like on GitHub.
+        // Every heading carries an anchor id (kept when it already has one,
+        // e.g. raw HTML) so fragment links resolve at any depth, independent
+        // of which levels the outline lists; the list below filters after.
         if (!el.id) {
           el.id = outlineUniqueId(text);
+        }
+        if (outlineLevels.indexOf(level) < 0) {
+          continue;
         }
         items.push({ el: el, level: level, text: text });
       }
@@ -749,10 +811,93 @@
     rebuildOutline();
   };
 
+  // ---------------------------------------------------------------------
+  // Fragment links: scroll the preview to the section a "#slug" names.
+  // ---------------------------------------------------------------------
+  // A fragment reaches the page two ways: an in-page "<a href="#slug">"
+  // click (the form markdown TOCs use), and — via the C++ side — a link to
+  // another document ("../doc.md#slug") that was opened in the editor and
+  // whose document the preview renders now. Both land here: the exact element
+  // id first (a heading anchor we generated, or a raw HTML id), then a
+  // tolerant heading match for slugs written against slightly different rules.
+  window.__scrollToFragment = function (frag) {
+    if (!frag) {
+      return false;
+    }
+    var el = document.getElementById(frag) || headingForFragment(frag);
+    if (!el) {
+      return false;
+    }
+    el.scrollIntoView({ block: "start" }); // instant, like a native anchor
+    flashHeading(el);
+    return true;
+  };
+
+  // The heading a "#slug" fragment names when no element carries that exact
+  // id. Comparison is case- and punctuation-insensitive (only letters and
+  // digits count), so slugs produced by other markdown renderers still match;
+  // repeated headings are told apart by GitHub's occurrence numbering
+  // ("install", "install-1", "install-2", ...).
+  function headingForFragment(frag) {
+    var content = document.getElementById("content");
+    if (!content) {
+      return null;
+    }
+    var wanted = frag.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+    // Null-prototype map: see the outlineTakenIds declaration.
+    var seen = Object.create(null);
+    var headings = content.querySelectorAll("h1, h2, h3, h4, h5, h6");
+    for (var i = 0; i < headings.length; i++) {
+      var text = outlineHeadingText(headings[i]);
+      if (!text) {
+        continue;
+      }
+      var base = outlineSlug(text);
+      var n = (seen[base] = (seen[base] || 0) + 1);
+      var id = n === 1 ? base : base + "-" + (n - 1);
+      if (id.replace(/[^\p{L}\p{N}]+/gu, "") === wanted) {
+        return headings[i];
+      }
+    }
+    return null;
+  }
+
+  // In-page "#slug" clicks scroll natively when an element with that id
+  // exists (Chromium's fragment navigation); only a click naming no element —
+  // a heading the preview left id-less, or a foreign slug — is retried
+  // through the tolerant match above. Document links ("doc.md#x") are never
+  // touched here: the host opens them (see openLink).
+  function onFragmentClick(e) {
+    var a = e.target && e.target.closest ? e.target.closest("a[href]") : null;
+    if (!a || e.defaultPrevented || e.button !== 0) {
+      return;
+    }
+    var href = a.getAttribute("href");
+    if (!href || href.charAt(0) !== "#") {
+      return;
+    }
+    var frag = href.slice(1);
+    if (!frag) {
+      return; // "#": native scroll-to-top
+    }
+    try {
+      frag = decodeURIComponent(frag);
+    } catch (err) {
+      // malformed escapes: keep the fragment as written
+    }
+    if (document.getElementById(frag)) {
+      return; // native fragment navigation scrolls to it
+    }
+    if (window.__scrollToFragment(frag)) {
+      e.preventDefault();
+    }
+  }
+
   // preview.js lives in <head>, so the document body does not exist yet at
   // parse time; build the control once the DOM is ready. This also makes a
   // standalone exported .html re-wire the control from the already-rendered
-  // headings.
+  // headings. The click listener needs no DOM and is attached right away.
+  document.addEventListener("click", onFragmentClick, false);
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", function () {
       ensureOutlineUi();

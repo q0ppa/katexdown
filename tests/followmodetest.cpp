@@ -17,6 +17,7 @@
 
 #include <QAction>
 #include <QDeadlineTimer>
+#include <QDir>
 #include <QFile>
 #include <QIcon>
 #include <QTemporaryDir>
@@ -108,20 +109,22 @@ public Q_SLOTS:
         }
         return nullptr;
     }
-    // Opens (or focuses) the document, like Kate's openUrl: the document
-    // becomes the active view and viewChanged fires.
+    // Opens (or focuses) the document, like Kate's openUrl: the fragment of a
+    // "doc.md#section" link is dropped (the file itself opens), the document
+    // becomes the active view, and viewChanged fires.
     KTextEditor::View *openUrl(const QUrl &url, const QString &encoding)
     {
         Q_UNUSED(encoding);
         ++openUrlCalls;
+        const QUrl docUrl = url.adjusted(QUrl::RemoveFragment);
         for (KTextEditor::View *view : std::as_const(allViews)) {
-            if (view->document()->url() == url) {
+            if (view->document()->url() == docUrl) {
                 setActive(view);
                 return view;
             }
         }
         KTextEditor::Document *doc = KTextEditor::Editor::instance()->createDocument(nullptr);
-        doc->openUrl(url);
+        doc->openUrl(docUrl);
         KTextEditor::View *view = doc->createView(nullptr);
         allViews << view;
         setActive(view);
@@ -226,12 +229,26 @@ static bool waitForText(PreviewWidget *preview, QLatin1String needle)
     return false;
 }
 
+// Poll a JS expression until it evaluates to the expected string.
+static bool waitForCond(PreviewWidget *preview, const QString &code, const QString &expected)
+{
+    QDeadlineTimer deadline(20000);
+    while (!deadline.hasExpired()) {
+        if (evalJs(preview, code) == expected) {
+            return true;
+        }
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+    }
+    return false;
+}
+
 class FollowModeTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
     void initTestCase();
     void onePanelFollowsTheActiveDocumentEndToEnd();
+    void fragmentLinksFollowAndScroll();
     void loadingModesGovernPreviewLifetime();
     void sessionRestoreCreatesPreviewEarly();
     void keptModesFreezeAndReleaseWhileClosed();
@@ -381,6 +398,106 @@ void FollowModeTest::onePanelFollowsTheActiveDocumentEndToEnd()
     // wrapper/factory chain crashes QtWebEngine's offscreen renderer on some
     // setups. The remaining plain widgets are reclaimed by the OS at exit.
     QTest::qWait(300);
+    host.release();
+}
+
+// Fragment links ("[section](sub/doc.md#deep-section)") open the target in the
+// editor like any link — and the preview, which follows the document the link
+// just activated, then lands on the section the fragment names instead of the
+// top of the file. A fragment link to the document the preview is already
+// showing jumps in place. The editor side never scrolls: the section jump
+// exists in the preview only.
+void FollowModeTest::fragmentLinksFollowAndScroll()
+{
+    Settings::self()->setLoadingMode(Settings::LazyKeep);
+
+    // The target lives in a subdirectory so the document switch goes through a
+    // full page load (different folder, different base URL), and it is opened
+    // by the click itself — Kate loads it asynchronously, which is exactly the
+    // race the pending-anchor machinery must survive (a render can run before
+    // the file's text has arrived).
+    const QString fromPath = m_dir.filePath(QStringLiteral("frag-from.md"));
+    {
+        QFile f(fromPath);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        QVERIFY(f.write(QStringLiteral("# Frag from\n\n[Deep section](sub/sectioned.md#deep-section)\n\nfrom body text.\n").toUtf8()) > 0);
+    }
+    QVERIFY(QDir(m_dir.path()).mkpath(QStringLiteral("sub")));
+    QString sectioned = QStringLiteral("# Sectioned\n\nintroduction paragraph.\n\n");
+    for (int i = 0; i < 60; ++i) {
+        sectioned += QStringLiteral("Filler paragraph %1 giving the document enough height to scroll.\n\n").arg(i);
+    }
+    sectioned += QStringLiteral("## Deep Section\n\nsection body text.\n\n[Back to the top](sectioned.md#sectioned)\n");
+    const QString sectionedPath = m_dir.filePath(QStringLiteral("sub/sectioned.md"));
+    {
+        QFile f(sectionedPath);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        QCOMPARE(f.write(sectioned.toUtf8()), sectioned.size());
+    }
+
+    auto host = std::make_unique<FakeHost>();
+    host->show();
+    QTest::qWait(50);
+    KTextEditor::MainWindow wrapper(host.get());
+    connect(host.get(), &FakeHost::viewChanged, &wrapper, &KTextEditor::MainWindow::viewChanged);
+
+    {
+        DummyPlugin plugin(nullptr);
+        PluginView pluginView(&plugin, &wrapper);
+
+        KTextEditor::Document *from = KTextEditor::Editor::instance()->createDocument(nullptr);
+        QVERIFY(from->openUrl(QUrl::fromLocalFile(fromPath)));
+        QTRY_VERIFY(from->text().contains(QLatin1String("from body")));
+        KTextEditor::View *fromView = from->createView(nullptr);
+        host->allViews << fromView;
+        host->setActive(fromView);
+
+        QVERIFY(QMetaObject::invokeMethod(&pluginView, "togglePreview"));
+        QVERIFY(host->toolShown);
+        PreviewWidget *preview = previewIn(host->toolView);
+        QVERIFY(preview);
+        host->toolView->resize(700, 500);
+        QTest::qWait(200);
+        QVERIFY(waitForText(preview, QLatin1String("from body")));
+
+        // Click the markdown link inside the preview. The click is handled like
+        // a real navigation: the target opens through the host and the preview
+        // follows it; once sectioned.md has rendered, the preview scrolls the
+        // "Deep Section" heading into view and flashes it.
+        QCOMPARE(evalJs(preview,
+                        QStringLiteral("var a = document.querySelector('#content a[href=\"sub/sectioned.md#deep-section\"]'); "
+                                       "a ? (a.click(), true) : false")),
+                 QStringLiteral("true"));
+        QVERIFY(waitForText(preview, QLatin1String("section body")));
+        QCOMPARE(host->openUrlCalls, 1);
+        QVERIFY(waitForCond(preview,
+                            QStringLiteral("var h = document.getElementById('deep-section'); "
+                                           "h !== null && h.classList.contains('kdx-outline-jumped')"),
+                            QStringLiteral("true")));
+        QVERIFY(waitForCond(preview,
+                            QStringLiteral("window.scrollY > 300 ? 'jumped' : 'still-top'"),
+                            QStringLiteral("jumped")));
+
+        // A fragment link to the document the preview already shows (the
+        // self-file form "sectioned.md#sectioned") jumps in place — the same
+        // editor view is merely re-focused, no re-render — back to the top
+        // heading, which flashes again.
+        QTest::qWait(300); // let any trailing render of the switch settle
+        QCOMPARE(evalJs(preview,
+                        QStringLiteral("var a = document.querySelector('#content a[href=\"sectioned.md#sectioned\"]'); "
+                                       "a ? (a.click(), true) : false")),
+                 QStringLiteral("true"));
+        QVERIFY(waitForCond(preview,
+                            QStringLiteral("var h = document.getElementById('sectioned'); "
+                                           "h !== null && h.classList.contains('kdx-outline-jumped')"),
+                            QStringLiteral("true")));
+        QVERIFY(waitForCond(preview,
+                            QStringLiteral("window.scrollY < 50 ? 'back-at-top' : 'not-top'"),
+                            QStringLiteral("back-at-top")));
+        QCOMPARE(host->openUrlCalls, 2); // same document again: just re-focused
+
+        delete from;
+    }
     host.release();
 }
 

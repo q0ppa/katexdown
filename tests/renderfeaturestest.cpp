@@ -104,7 +104,9 @@ private Q_SLOTS:
     void parkingPreservesTheImageBox();
     void relativeCssResolvesAgainstDataDir();
     void outlineListsConfiguredHeadings();
+    void fragmentLinksJumpToSections();
     void enginesAreLoadedOnlyWhenTheTextNeedsThem();
+    void oversizedFenceRendersPlain();
 
 private:
     KTextEditor::Document *openDocument(const QString &text);
@@ -495,6 +497,80 @@ void RenderFeaturesTest::outlineListsConfiguredHeadings()
     Settings::self()->setTocLevels({1, 2, 3, 4, 5}); // leave the default for later tests
 }
 
+// Fragment links ("[install](#install)" in the page, "doc.md#section" across
+// documents) resolve to the right section. Every heading — at any depth and
+// whatever the configured outline levels — carries a GitHub-style anchor id
+// ("What's next?" -> "whats-next", repeated headings numbered "-1", "-2", ...),
+// and __scrollToFragment lands on the exact id, or on a tolerant match when
+// the slug was written against slightly different rules.
+void RenderFeaturesTest::fragmentLinksJumpToSections()
+{
+    QVERIFY(m_dir.isValid());
+    Settings::self()->setTocLevels({1, 2, 3}); // the outline lists H1-H3 only
+
+    QString text = QStringLiteral("# Intro\n\nSome introduction prose.\n\n");
+    for (int i = 0; i < 40; ++i) {
+        text += QStringLiteral("Filler paragraph %1 to make the document taller than the viewport.\n\n").arg(i);
+    }
+    text += QStringLiteral(
+        "## What's next?\n\nQuick note.\n\n"
+        "## Install\n\nFirst time.\n\n"
+        "## Install\n\nAgain.\n\n"
+        "###### Deep six\n\nfinally the bottom.\n");
+    KTextEditor::Document *doc = openDocument(text);
+    auto preview = makePreview(doc);
+    QVERIFY(waitForPageText(preview.get(), QLatin1String("finally the bottom")));
+    preview->resize(800, 600);
+    preview->show();
+    QTest::qWait(300);
+
+    // Anchor ids follow GitHub's rules at every level, independent of the
+    // outline configuration ("What's next?" drops the apostrophe; the second
+    // "Install" gets "-1").
+    const QString ids = evalJs(preview.get(),
+                               QStringLiteral("['intro','whats-next','install','install-1','deep-six'].map(function (id) { "
+                                              "var el = document.getElementById(id); return el ? el.tagName : ''; }).join(',')"));
+    QCOMPARE(ids, QStringLiteral("H1,H2,H2,H2,H6"));
+    // The outline list itself still honors the configured levels (H1-H3 only).
+    const QString listed = evalJs(preview.get(),
+                                  QStringLiteral("Array.prototype.map.call(document.querySelectorAll('#kdx-outline-list .kdx-outline-item'), "
+                                                 "function (li) { return li.getAttribute('data-level'); }).join(',')"));
+    QCOMPARE(listed, QStringLiteral("1,2,2,2"));
+
+    // Jump to a section by exact id: the preview scrolls and flashes it.
+    QCOMPARE(evalJs(preview.get(), QStringLiteral("window.__scrollToFragment('deep-six')")), QStringLiteral("true"));
+    QTest::qWait(300);
+    QCOMPARE(evalJs(preview.get(), QStringLiteral("window.scrollY > 600 ? 'scrolled' : 'no'")), QStringLiteral("scrolled"));
+    QCOMPARE(evalJs(preview.get(), QStringLiteral("document.getElementById('deep-six').classList.contains('kdx-outline-jumped')")),
+             QStringLiteral("true"));
+
+    // A slug that no element carries still lands through the tolerant match
+    // ("what's next?" as "what-s-next", as a punctuation-to-dash slugger
+    // would write it).
+    QCOMPARE(evalJs(preview.get(), QStringLiteral("window.__scrollToFragment('what-s-next')")), QStringLiteral("true"));
+    QTest::qWait(300);
+    QCOMPARE(evalJs(preview.get(), QStringLiteral("document.getElementById('whats-next').classList.contains('kdx-outline-jumped')")),
+             QStringLiteral("true"));
+
+    // A fragment naming nothing changes nothing and reports failure.
+    QCOMPARE(evalJs(preview.get(), QStringLiteral("window.__scrollToFragment('does-not-exist')")), QStringLiteral("false"));
+    delete doc;
+
+    // With the outline switched off entirely, headings keep their anchor ids
+    // (only the list disappears), so fragment links keep working.
+    Settings::self()->setTocLevels({});
+    KTextEditor::Document *docOff = openDocument(QStringLiteral("# Still anchored\n\nbody text.\n"));
+    auto previewOff = makePreview(docOff);
+    QVERIFY(waitForPageText(previewOff.get(), QLatin1String("body text")));
+    QVERIFY(waitForCond(previewOff.get(),
+                        QStringLiteral("var b = document.getElementById('kdx-outline-btn'); "
+                                       "b !== null && getComputedStyle(b).display === 'none' && document.getElementById('still-anchored') !== null"),
+                        QStringLiteral("true")));
+    delete docOff;
+
+    Settings::self()->setTocLevels({1, 2, 3, 4, 5}); // leave the default
+}
+
 // The heavy engines (KaTeX, highlight.js, js-yaml) are inlined into a page
 // only when the mirrored text can use them. Introducing such content while the
 // preview is open triggers a one-time page rebuild; switching to a document
@@ -554,6 +630,69 @@ void RenderFeaturesTest::enginesAreLoadedOnlyWhenTheTextNeedsThem()
     } else {
         qputenv("KATEXDOWN_DATA_DIR", oldDataDir);
     }
+}
+
+// A fence larger than the highlight cap (kdxHljsMaxChars in preview.js) is
+// rendered as plain escaped text instead of being tokenized into thousands of
+// hljs spans: a single oversized block (a pasted bundle or dump) must not be
+// able to blow the DOM up. The text, the <pre> box and HTML escaping stay
+// intact; only the syntax colors are lost, while normal-sized fences keep
+// their highlighting.
+void RenderFeaturesTest::oversizedFenceRendersPlain()
+{
+    // Read the cap from the loaded page (single source of truth is preview.js).
+    KTextEditor::Document *probe = openDocument(QStringLiteral("# probe\n"));
+    auto preview = makePreview(probe);
+    QVERIFY(waitForPageText(preview.get(), QLatin1String("probe")));
+    const int cap = evalJs(preview.get(), QStringLiteral("Number(window.kdxHljsMaxChars)")).toInt();
+    QVERIFY2(cap > 1000, qPrintable(QStringLiteral("highlight cap missing/too small: %1").arg(cap)));
+
+    // One ordinary fence plus one fence comfortably above the cap. Both use a
+    // language highlight.js knows and tokens that would normally highlight
+    // (var/function/string/number); the giant one also carries raw HTML that
+    // must stay inert text.
+    const QString giantUnit = QStringLiteral("var function omega2 = \"<script>alert(1)</script>&amp;\";\n");
+    const QString giantBody = giantUnit.repeated(cap / giantUnit.size() + 40)
+        + QStringLiteral("var tailToken = true; // zzend\n");
+    QVERIFY2(giantBody.size() > cap + 200, qPrintable(QStringLiteral("giant fence only %1 chars").arg(giantBody.size())));
+
+    KTextEditor::Document *doc = openDocument(QStringLiteral("# fences\n\n```js\nvar smallToken = 1;\n```\n\n```js\n%1```\n")
+                                                  .arg(giantBody));
+    preview->attachDocument(doc, nullptr);
+    QVERIFY(waitForPageText(preview.get(), QLatin1String("fences")));
+    // The fenced content brings highlight.js in (one-time rebuild), then the
+    // giant body renders as plain text.
+    QVERIFY(waitForCond(preview.get(), QStringLiteral("typeof window.hljs"), QStringLiteral("object")));
+    QVERIFY(waitForCond(preview.get(),
+                        QStringLiteral("(function () { var t = document.getElementById('content').innerText; "
+                                       "return t.indexOf('smallToken') >= 0 && t.indexOf('tailToken') >= 0 ? 'done' : 'wait'; })()"),
+                        QStringLiteral("done")));
+
+    // Exactly two <pre> blocks (the fences did not merge or vanish) and the
+    // giant body arrived verbatim, HTML entities decoded back by the DOM.
+    QCOMPARE(evalJs(preview.get(), QStringLiteral("document.querySelectorAll('#content pre').length")), QStringLiteral("2"));
+    QCOMPARE(evalJs(preview.get(),
+                    QStringLiteral("(function () { var ps = document.querySelectorAll('#content pre code'); "
+                                   "return ps.length === 2 && ps[1].textContent.indexOf('var tailToken = true; // zzend') >= 0 "
+                                   "&& ps[1].textContent.indexOf('<script>alert(1)</script>&amp;') >= 0 ? 'ok' : 'bad'; })()")),
+             QStringLiteral("ok"));
+
+    // The giant fence must not have introduced a live <script> or any hljs
+    // token span; the small fence must still be highlighted.
+    QCOMPARE(evalJs(preview.get(), QStringLiteral("document.querySelectorAll('#content script').length")), QStringLiteral("0"));
+    QCOMPARE(evalJs(preview.get(),
+                    QStringLiteral("(function () { var ps = document.querySelectorAll('#content pre'); "
+                                   "return [ps[0].querySelectorAll('[class*=hljs-]').length > 0, "
+                                   "ps[1].querySelectorAll('[class*=hljs-]').length === 0].join(','); })()")),
+             QStringLiteral("true,true"));
+
+    // Character-for-character round trip through the giant block: the cap only
+    // drops colors, never content.
+    QCOMPARE(evalJs(preview.get(), QStringLiteral("document.querySelectorAll('#content pre code')[1].textContent.length")),
+             QString::number(giantBody.size()));
+
+    delete doc;
+    delete probe;
 }
 
 QTEST_MAIN(RenderFeaturesTest)

@@ -478,6 +478,15 @@ PreviewWidget::PreviewWidget(KTextEditor::MainWindow *mainWindow, KTextEditor::V
             m_loaded = false;
             m_memEstimate = 0;
             m_lastRecycle.restart();
+            // A discarded page's JS context (and its decode counter) is gone:
+            // the fresh page starts from zero, and its first render replaces
+            // nothing, so it must not be charged like a content-replacing
+            // render (that would keep a large idle document "due" forever and
+            // recycle it in a loop — see render()/noteRenderWork).
+            m_renderedOnce = false;
+            m_decodePollPending = false;
+            m_lastDecodeCount = 0;
+            m_lastDecodeBytes = 0;
             if (m_recycling && !m_panelClosed && m_pendingExportPath.isEmpty()) {
                 // The recycle's fresh page: load the mirrored document now.
                 loadPage();
@@ -492,6 +501,7 @@ PreviewWidget::PreviewWidget(KTextEditor::MainWindow *mainWindow, KTextEditor::V
             // Closed-panel freeze ran Chromium's purge: the estimate is spent.
             m_memEstimate = 0;
             m_lastRecycle.restart();
+            m_decodePollPending = false;
         }
         noteActivity();
         if (qEnvironmentVariableIsSet("KATEXDOWN_DEBUG")) {
@@ -541,6 +551,11 @@ PreviewWidget::PreviewWidget(KTextEditor::MainWindow *mainWindow, KTextEditor::V
         // after a document switch (the preview never navigates back/forward).
         m_web->history()->clear();
         installInputFilter();
+        // A fresh navigation brought a fresh JS context: the page's decode
+        // counter restarted at zero, so the poll bookkeeping must follow.
+        m_decodePollPending = false;
+        m_lastDecodeCount = 0;
+        m_lastDecodeBytes = 0;
         applyTheme();
         // Apply the image mode before the first render so the page never
         // renders once in the default mode and again in the configured one
@@ -846,6 +861,7 @@ void PreviewWidget::performExport(const QString &path)
     noteRenderWork(m_text.size(), false);
     noteActivity();
     runJs(QStringLiteral("window.__setMarkdown(%1);").arg(jsLiteral(m_text)));
+    m_renderedOnce = true;
     // Re-render is synchronous in the page; give the compositor a moment and
     // then serialize the current DOM, styles and all.
     QTimer::singleShot(300, this, [this, path]() {
@@ -870,10 +886,58 @@ void PreviewWidget::performExport(const QString &path)
 void PreviewWidget::openLink(const QUrl &url)
 {
     if (url.isLocalFile() && m_mainWindow) {
+        // A fragment link ("../doc.md#section") names a section as well as a
+        // document. Kate opens the document and drops the fragment there;
+        // remember it so the preview can land on the section once this
+        // document renders here (see render). When the preview is already
+        // showing the target document and nothing is about to re-render it
+        // (Kate only re-focused the same document), apply the anchor right
+        // away; a live document is required, because for the frozen snapshot
+        // of a closed document the click opens the file afresh and its render
+        // applies the anchor.
+        if (url.hasFragment()) {
+            m_pendingFragmentDoc = url.adjusted(QUrl::RemoveFragment);
+            m_pendingFragment = url.fragment();
+            if (m_doc && m_loaded && !m_debounce->isActive() && m_pendingExportPath.isEmpty() && !m_recycling
+                && sameDocumentAsCurrent(m_pendingFragmentDoc)) {
+                attemptFragmentJump();
+            }
+        }
         m_mainWindow->openUrl(url);
     } else if (!url.scheme().isEmpty()) {
         QDesktopServices::openUrl(url);
     }
+}
+
+// Ask the page to scroll the pending fragment's section into view. The page
+// answers whether it found the section; when it did not yet — typically
+// because Kate opened the clicked document asynchronously, so the first render
+// ran on empty text — the anchor stays pending and the next render of the
+// target document retries it. render() clears it once any other document
+// renders instead.
+void PreviewWidget::attemptFragmentJump()
+{
+    if (m_pendingFragment.isEmpty() || !m_loaded) {
+        return;
+    }
+    const QString code = QStringLiteral("window.__scrollToFragment(%1);").arg(jsLiteral(m_pendingFragment));
+    m_web->page()->runJavaScript(code, [this](const QVariant &found) {
+        if (found.toBool()) {
+            m_pendingFragment.clear();
+            m_pendingFragmentDoc = QUrl();
+        }
+    });
+}
+
+// Does doc name the document the preview is currently showing? m_url holds
+// the document URL both while it is live (m_doc set) and after the editor tab
+// closed (frozen snapshot of the last content).
+bool PreviewWidget::sameDocumentAsCurrent(const QUrl &doc) const
+{
+    const QUrl current = (m_doc && !m_doc->url().isEmpty()) ? m_doc->url() : m_url;
+    const QString a = doc.isLocalFile() ? QFileInfo(doc.toLocalFile()).absoluteFilePath() : QString();
+    const QString b = current.isLocalFile() ? QFileInfo(current.toLocalFile()).absoluteFilePath() : QString();
+    return !a.isEmpty() && a == b;
 }
 
 void PreviewWidget::applyMediaPolicy()
@@ -927,6 +991,10 @@ void PreviewWidget::render()
         m_text = m_doc->text();
         m_bufferStale = false; // live content supersedes any close-time snapshot
     }
+    // Cheap gate for the decode poll (see idleTick): only documents that can
+    // contain images justify a per-second JS roundtrip. A false positive ("!["
+    // inside a code fence) only costs a harmless poll that reports 0 decodes.
+    m_textMayHaveImages = m_text.contains(QLatin1String("![")) || m_text.contains(QLatin1String("<img"));
     // A document can grow into engines the page was built without (math, a
     // code fence or front matter typed in after the last load). Rebuild the
     // page once so the engines join; loadFinished() then renders the current
@@ -938,13 +1006,32 @@ void PreviewWidget::render()
         loadPage();
         return;
     }
-    // Every full-document push costs the renderer a chunk proportional to the
-    // text (measured in the renderer-memory maintenance notes); count it now.
-    noteRenderWork(m_text.size(), false);
+    // Every full-document push that *replaces* already-rendered content costs
+    // the renderer a chunk proportional to the text (measured in the
+    // renderer-memory maintenance notes); count it now. A page's first render
+    // (first open, or the fresh load after a maintenance recycle) replaces
+    // nothing, so it is not charged — charging it would keep a large idle
+    // document's estimate over the budget forever and recycle it in a loop.
+    if (m_renderedOnce) {
+        noteRenderWork(m_text.size(), false);
+    }
     runJs(QStringLiteral("window.__setMarkdown(%1);").arg(jsLiteral(m_text)));
+    m_renderedOnce = true;
     if (m_pendingScrollReset) {
         m_pendingScrollReset = false;
         runJs(QStringLiteral("window.scrollTo(0, 0);"));
+    }
+    // A fragment link whose target this document is: land on its section now
+    // that the content is in the DOM (the anchor survives renders that ran
+    // before an asynchronously opened document had text, until the page finds
+    // the section). A render of any other document drops the anchor instead.
+    if (!m_pendingFragment.isEmpty()) {
+        if (sameDocumentAsCurrent(m_pendingFragmentDoc)) {
+            attemptFragmentJump();
+        } else {
+            m_pendingFragment.clear();
+            m_pendingFragmentDoc = QUrl();
+        }
     }
     noteActivity();
 }
@@ -1068,6 +1155,16 @@ void PreviewWidget::idleTick()
         return; // only recycle a page the user can actually see
     }
     if (!recycleDue() || !recycleIdle() || webHasFocus()) {
+        // Not recycling on this tick. If the document can contain images, poll
+        // the page's decode counter anyway: image decodes are dirt that arrives
+        // without a render or a navigation, and the poll callback re-checks the
+        // recycle gates once the charge pushes the estimate over the budget.
+        if (m_textMayHaveImages && !m_decodePollPending) {
+            m_decodePollPending = true;
+            m_web->page()->runJavaScript(
+                QStringLiteral("window.__kdxDecodeStats ? window.__kdxDecodeStats() : '0:0'"),
+                [this](const QVariant &v) { handleDecodeStats(v.toString()); });
+        }
         return;
     }
     performMemoryRecycle(true); // same document: keep the scroll position
@@ -1176,6 +1273,60 @@ void PreviewWidget::abortRecycle()
     noteActivity();
 }
 
+// The page answered the 1 Hz decode poll: charge any decodes that happened
+// since the last poll against the dead-memory estimate, then apply the same
+// gates idleTick would (panel open, page loaded/active/visible, quiet, not
+// focused) and recycle when the budget is now crossed. Without this an
+// image-heavy reading session accumulates sticky decoded frames the renderer
+// never returns (measured at ~8-10 MB per photo scrolled past, in every image
+// mode) while the estimate stays low and the maintenance never fires.
+void PreviewWidget::handleDecodeStats(const QString &stats)
+{
+    m_decodePollPending = false;
+    const int colon = stats.indexOf(QLatin1Char(':'));
+    bool okCount = false;
+    bool okBytes = false;
+    const double count = colon > 0 ? stats.left(colon).toDouble(&okCount) : 0;
+    const double bytes = colon > 0 ? stats.mid(colon + 1).toDouble(&okBytes) : 0;
+    const double dCount = okCount ? count - m_lastDecodeCount : 0;
+    const double dBytes = okBytes ? bytes - m_lastDecodeBytes : 0;
+    if (dCount <= 0 && dBytes <= 0) {
+        return; // nothing decoded since the last poll
+    }
+    m_lastDecodeCount = count;
+    m_lastDecodeBytes = bytes;
+
+    // KATEXDOWN_MEM_IMG_CHARGE_MB overrides the charge with a flat amount per
+    // decode (deterministic for tests); otherwise the page's own conservative
+    // byte figure is used (intrinsic pixels of the decode, capped).
+    qint64 charge = 0;
+    if (m_imgFlatChargeBytes > 0) {
+        charge = m_imgFlatChargeBytes * static_cast<qint64>(dCount);
+    } else if (dBytes > 0) {
+        charge = static_cast<qint64>(dBytes);
+    }
+    if (charge > 0) {
+        m_memEstimate += charge;
+        if (qEnvironmentVariableIsSet("KATEXDOWN_DEBUG")) {
+            qDebug() << "[katexdown] image decodes since last poll:" << dCount << "charging" << charge << "bytes";
+        }
+    }
+
+    if (m_panelClosed || m_recycling || !m_loaded || !m_pendingExportPath.isEmpty()) {
+        return;
+    }
+    if (m_web->page()->lifecycleState() != QWebEnginePage::LifecycleState::Active) {
+        return;
+    }
+    if (!m_web->isVisible()) {
+        return;
+    }
+    if (!recycleDue() || !recycleIdle() || webHasFocus()) {
+        return;
+    }
+    performMemoryRecycle(true);
+}
+
 // Renderer-memory estimate (see the maintenance design in lazyrender.md): a
 // full page load costs the renderer a fixed, content-independent chunk
 // (re-executing every inlined engine), and every full-document markdown push
@@ -1236,6 +1387,12 @@ void PreviewWidget::readMemTuning()
     const int maxAgeMs = qEnvironmentVariableIntValue("KATEXDOWN_MEM_MAX_AGE_MS");
     if (maxAgeMs > 0) {
         m_memMaxAgeMs = maxAgeMs;
+    }
+    // Flat per-decode image charge (MiB), overriding the page-reported byte
+    // figure; doubles as a deterministic test hook (KATEXDOWN_MEM_*).
+    const int imgChargeMb = qEnvironmentVariableIntValue("KATEXDOWN_MEM_IMG_CHARGE_MB");
+    if (imgChargeMb > 0) {
+        m_imgFlatChargeBytes = qint64(imgChargeMb) * 1024 * 1024;
     }
     if (qEnvironmentVariableIsSet("KATEXDOWN_MEM_OFF")) {
         m_memBudgetBytes = std::numeric_limits<qint64>::max();

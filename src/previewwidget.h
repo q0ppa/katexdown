@@ -116,6 +116,12 @@ private:
     void runJs(const QString &code);
     void loadPage();
     void openLink(const QUrl &url);
+    // Fragment links: apply the pending anchor (m_pendingFragment) in the page
+    // and drop it once the page reports the section was found (see render).
+    void attemptFragmentJump();
+    // Does doc name the document the preview is currently showing (live, or
+    // the frozen snapshot when the editor tab is gone)?
+    bool sameDocumentAsCurrent(const QUrl &doc) const;
     void applyMediaPolicy();
     QUrl baseUrl() const;
     // Assemble the self-contained page. engines is the bitmask (kEngine* in
@@ -138,6 +144,12 @@ private:
     // once the estimate passes a budget the renderer is recycled.
     void noteRenderWork(qint64 textBytes, bool navigation);
     void noteActivity();
+    // Image-decode accounting: the page exposes a cumulative decode counter
+    // (window.__kdxDecodeStats, see preview.js); idleTick polls it while an
+    // image-bearing document is open and charges the dead-memory estimate per
+    // decode, so a session that scrolls past photos dirties the renderer like
+    // text churn does (Chromium keeps decoded frames it will not return).
+    void handleDecodeStats(const QString &stats);
     // Recycle bookkeeping: hide + discard the page, load a fresh one, restore
     // the panel. The cycle is driven by lifecycle events + idleTick retries.
     void beginRecycle();
@@ -179,6 +191,23 @@ private:
     qint64 m_memBudgetBytes = 128ll * 1024 * 1024;
     int m_memIdleMs = 6000;
     int m_memMaxAgeMs = 180000;
+    // True once the page that is currently loaded has pushed its content at
+    // least once. Renders that replace already-rendered content are what leave
+    // dead memory behind, so the text charge is skipped for a page's first
+    // render — a fresh page (first open, or the fresh load of a maintenance
+    // recycle) is not charged for its own initial render. Reset together with
+    // the estimate when a discard kills the renderer.
+    bool m_renderedOnce = false;
+    // Image-decode accounting state: whether the current text can contain
+    // images (cheap contains() gate that decides if the 1 Hz poll is worth
+    // an IPC roundtrip), whether a poll is in flight, the last reported
+    // cumulative decode count/bytes from the page, and an optional flat
+    // per-decode charge in bytes (KATEXDOWN_MEM_IMG_CHARGE_MB, tests).
+    bool m_textMayHaveImages = false;
+    bool m_decodePollPending = false;
+    double m_lastDecodeCount = 0;
+    double m_lastDecodeBytes = 0;
+    qint64 m_imgFlatChargeBytes = 0;
     // True between "the recycle was decided" and "the fresh page finished
     // loading". While set, the lifecycle machinery treats a Discarded event as
     // part of the recycle (load the mirrored document again) instead of as a
@@ -218,4 +247,12 @@ private:
     // place like an edit would; the next render() must reset the scroll to the
     // top, because a new document must start at its beginning.
     bool m_pendingScrollReset = false;
+    // A fragment link ("../doc.md#section") clicked in the preview names a
+    // section as well as a document. Kate opens the document (dropping the
+    // fragment); the anchor below is re-applied once that document renders
+    // here — see openLink / render / attemptFragmentJump. The target document
+    // (fragment stripped) tells render() whether it may apply the anchor or
+    // must drop it (the preview moved to another document).
+    QUrl m_pendingFragmentDoc;
+    QString m_pendingFragment;
 };
