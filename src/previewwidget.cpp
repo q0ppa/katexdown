@@ -101,26 +101,47 @@ static bool lineLooksLikeMath(const QString &text, int from, int to)
         if (p + 1 < to && text.at(p + 1) == QLatin1Char('$')) {
             return true; // $$ display math (may span lines)
         }
-        // Inline $...$: the opener must not sit against a space or a digit
-        // (that would be currency, "$5"), and the pair must enclose at least
-        // one LaTeX-ish character. A closing dollar must exist on the same
-        // line — texmath's inline math does not span lines either.
-        const QChar next = text.at(p + 1);
-        if (next.isSpace() || next.isDigit()) {
-            continue;
+        // Inline $...$: mirror what markdown-it-texmath's dollars rule will
+        // actually parse (its lazy regex plus the $_pre/$_post guards), so the
+        // engine is loaded exactly when the page would turn the pair into
+        // math — never less. The rule: an opener's previous char must not be a
+        // digit ($_pre: "$5" after a number is currency, not math), the char
+        // after the opener must exist and be non-space (the regex needs \S
+        // content: "$ x$" is literal), and the closer is the first "$" whose
+        // previous char is neither space nor a backslash. Content that starts
+        // with a digit is math like any other — "$2^{192} - 2^{32}$" and
+        // even a bare "$2$" render in KaTeX, so there is deliberately no
+        // LaTeX-ish content requirement here. A closer followed by a digit
+        // ($_post: "$5$10" is currency) vetoes the whole opener; texmath
+        // retries only past that closer, and no later dollar on the line can
+        // close the pair either, so scanning resumes there.
+        if (p > from) {
+            const ushort prev = text.at(p - 1).unicode();
+            if (prev >= '0' && prev <= '9') {
+                continue; // $_pre: never math right after a digit
+            }
         }
-        bool latexish = false;
+        if (text.at(p + 1).isSpace()) {
+            continue; // the regex needs non-space content after the opener
+        }
         for (int q = p + 1; q < to; ++q) {
             const QChar c = text.at(q);
-            if (c == QLatin1Char('$')) {
-                return latexish; // closing dollar: math only with content
+            if (c != QLatin1Char('$')) {
+                continue;
             }
-            if (c.isLetter() || c == QLatin1Char('\\') || c == QLatin1Char('^') || c == QLatin1Char('_') || c == QLatin1Char('{')
-                || c == QLatin1Char('}')) {
-                latexish = true;
+            const QChar before = text.at(q - 1);
+            if (before.isSpace() || before == QLatin1Char('\\')) {
+                continue; // cannot close here ("$x $" or an escaped dollar)
             }
+            const ushort after = q + 1 < to ? text.at(q + 1).unicode() : 0;
+            if (after >= '0' && after <= '9') {
+                p = q; // $_post veto: "$5$10" is currency — resume past it
+                break;
+            }
+            return true; // a real closing dollar: texmath parses this pair
         }
-        // No closing dollar on this line: nothing further on it can pair up.
+        // No closing dollar on this line: inline math does not span lines,
+        // and nothing further on it can pair up.
         return false;
     }
     return false;

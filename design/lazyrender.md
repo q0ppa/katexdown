@@ -80,12 +80,23 @@ Rules:
 - markdown-it and preview.js are always inlined; the heavy engines are gated.
   KaTeX's stylesheet is gated together with its scripts; the (small) hljs
   stylesheets are always present so a theme switch can never leave a gap.
+- **The dollar scan mirrors the renderer, it never invents stricter rules.**
+  A line counts as math exactly when markdown-it-texmath (the `dollars` set)
+  would turn its `$...$` into a math token: opener not after a digit or
+  backslash (`$_pre`), non-space content after the opener, closer not
+  preceded by space/backslash and not followed by a digit (`$_post`). There
+  is deliberately **no LaTeX-ish content requirement** — `$2^{192} - 2^{32}$`
+  and even a bare `$2$` render like `$x$` does. Over-detecting (a prose pair
+  texmath would keep literal) only costs an inlined engine; under-detecting
+  strands the dollars as literal text with no way to self-heal.
 - **False negatives are self-healing:** a page that lacks an engine the text
   grows into is rebuilt *once* — `render()` (and `exportToFile()`) detect
   `enginesForText(m_text) & ~m_pageEngines != 0` and call `loadPage()`, a full
   `setHtml()` whose `loadFinished` re-applies mode/theme/content. A fully
   equipped page skips the scan entirely; a rebuild is stable (the rebuilt page
-  carries the engines the same text needs).
+  carries the engines the same text needs). Self-healing is only as good as
+  the scan: it cannot repair a detector false negative (see the digit-math
+  pitfall).
 - An engine a document *stops* needing only leaves on the next full load
   (document switch or rebuild), never mid-page.
 
@@ -463,6 +474,18 @@ A doc that outgrows the page's engine set still triggers the one-time rebuild
   both reset the estimate; otherwise the budget would fire immediately after
   the very recycle that just cleaned the renderer.
 
+- **A gate heuristic stricter than the renderer strands real math.**
+  `lineLooksLikeMath` used to treat a `$` right after a digit as currency
+  ("$5") and demanded a LaTeX-ish letter inside the pair, so numeric math
+  (`$2^{192} - 2^{32}$`, a bare `$2$` — both of which texmath parses happily)
+  never set `kEngineKatex`. The page was built without KaTeX, the dollars
+  rendered as literal text, and the "self-healing" rebuild used the same
+  scan, so typing such math into a plain document never recovered either.
+  The scan now mirrors texmath's `$_pre`/`$_post`/regex acceptance exactly
+  (see the rules above); `numberMathLoadsKatexEngine` pins both the initial
+  load and the typed-in rebuild, and keeps currency prose ("价格 $5 元",
+  "$10 and $20 are prices") engine-free.
+
 ## Test seams
 
 - Env hooks (named like the existing `KATEXDOWN_DEBUG`):
@@ -490,6 +513,10 @@ A doc that outgrows the page's engine set still triggers the one-time rebuild
     discards).
   - `renderfeaturestest::enginesAreLoadedOnlyWhenTheTextNeedsThem` —
     Invariant 4, including the one-time rebuild on growing text.
+  - `renderfeaturestest::numberMathLoadsKatexEngine` — the gate's parity with
+    texmath: numeric math (`$2^{192} - 2^{32}$`, `$2$`, `$10^3$`) loads the
+    KaTeX engine both on first load and when typed into a plain document,
+    while currency prose texmath keeps literal never does.
   - `renderfeaturestest::oversizedFenceRendersPlain` — Invariant 11: the cap
     is read from `window.kdxHljsMaxChars` (the page is the single source of
     truth); an oversized fence keeps its exact text, its `<pre>` box and its

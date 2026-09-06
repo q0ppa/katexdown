@@ -65,7 +65,7 @@ bool waitForFile(const QString &path)
     return false;
 }
 
-bool waitForPageText(PreviewWidget *preview, QLatin1String needle)
+bool waitForPageText(PreviewWidget *preview, const QString &needle)
 {
     QDeadlineTimer deadline(20000);
     while (!deadline.hasExpired()) {
@@ -106,6 +106,7 @@ private Q_SLOTS:
     void outlineListsConfiguredHeadings();
     void fragmentLinksJumpToSections();
     void enginesAreLoadedOnlyWhenTheTextNeedsThem();
+    void numberMathLoadsKatexEngine();
     void oversizedFenceRendersPlain();
 
 private:
@@ -159,6 +160,21 @@ void RenderFeaturesTest::mathRendersWhenAssetsPresent()
     // No parse errors: throwOnError is off, but the formulas above are valid.
     const int errorCount = evalJs(preview.get(), QStringLiteral("document.querySelectorAll('.katex-error').length")).toInt();
     QCOMPARE(errorCount, 0);
+
+    // A document whose only formulas are numeric must render too: the engine
+    // gate has to load KaTeX for "$2^{192} - 2^{32}$" and a bare "$2$"
+    // exactly like for "$x^2$". Regression: the gate treated a "$" after a
+    // digit as currency and required a LaTeX-ish letter inside the pair, so
+    // such a document never loaded KaTeX and its dollars stayed literal.
+    KTextEditor::Document *numDoc = openDocument(QStringLiteral(
+        "# numerics\n\n这是 NVIDIA CUDA toolkit 的默认方案，其周期为 $2^{192} - 2^{32}$。\n\nA bare $2$ alone.\n"));
+    auto numPreview = makePreview(numDoc);
+    QVERIFY(waitForPageText(numPreview.get(), QLatin1String("numerics")));
+    QCOMPARE(evalJs(numPreview.get(), QStringLiteral("typeof katex")), QStringLiteral("object"));
+    const int numInline = evalJs(numPreview.get(), QStringLiteral("document.querySelectorAll('#content .katex').length")).toInt();
+    QVERIFY2(numInline >= 2, qPrintable(QStringLiteral("numeric math not rendered (katex nodes: %1)").arg(numInline)));
+    QCOMPARE(evalJs(numPreview.get(), QStringLiteral("document.querySelectorAll('.katex-error').length")).toInt(), 0);
+    delete numDoc;
 
     delete doc;
 }
@@ -625,6 +641,62 @@ void RenderFeaturesTest::enginesAreLoadedOnlyWhenTheTextNeedsThem()
     QVERIFY(waitForCond(preview.get(), QStringLiteral("typeof window.hljs"), QStringLiteral("undefined")));
 
     delete doc;
+    if (oldDataDir.isNull()) {
+        qunsetenv("KATEXDOWN_DATA_DIR");
+    } else {
+        qputenv("KATEXDOWN_DATA_DIR", oldDataDir);
+    }
+}
+
+// Math whose content starts with (or is entirely) digits is real math to
+// markdown-it-texmath ("$2^{192} - 2^{32}$", a bare "$2$"), so it must pull
+// the KaTeX engine in exactly like "$x^2$" does — while prose dollar amounts
+// that texmath itself keeps literal ("价格 $5 元", "$10 and $20 are prices")
+// must not. Regression: the engine gate used to treat a "$" right after a
+// digit as currency and required a LaTeX-ish letter in the pair, so numeric
+// math never loaded KaTeX and stayed literal forever — and because the
+// one-time rebuild check used the same scan, typing such math into a plain
+// document never self-healed either.
+void RenderFeaturesTest::numberMathLoadsKatexEngine()
+{
+    QVERIFY(m_dir.isValid());
+    const QByteArray oldDataDir = qgetenv("KATEXDOWN_DATA_DIR");
+    const auto writeAsset = [this](const QString &name, const QByteArray &body) {
+        QFile f(m_dir.filePath(name));
+        return f.open(QIODevice::WriteOnly) && f.write(body) == body.size();
+    };
+    QVERIFY(writeAsset(QStringLiteral("katex.min.js"),
+                       QByteArrayLiteral("window.katex = { renderToString: function () { return ''; } };\n")));
+    QVERIFY(writeAsset(QStringLiteral("texmath.min.js"),
+                       QByteArrayLiteral("window.texmath = function () { return function () {}; };\n")));
+    qputenv("KATEXDOWN_DATA_DIR", m_dir.path().toUtf8());
+
+    const QString katexMarker = QStringLiteral(
+        "(function () { for (var i = 0; i < document.scripts.length; ++i) { "
+        "if (document.scripts[i].textContent.indexOf('renderToString') >= 0) return 'loaded'; } return 'absent'; })()");
+
+    // Currency-ish prose that texmath itself would keep literal must not pull
+    // KaTeX in: a lone amount (no closing dollar) and a pair whose closing $
+    // sits before a digit.
+    KTextEditor::Document *cur = openDocument(QStringLiteral("价格 $5 元。\n\n$10 and $20 are prices.\n"));
+    auto previewCur = makePreview(cur);
+    QVERIFY(waitForPageText(previewCur.get(), QStringLiteral("价格")));
+    QVERIFY(waitForCond(previewCur.get(), katexMarker, QStringLiteral("absent")));
+
+    // Numeric math typed in later: the text grows into the KaTeX engine and
+    // the page rebuilds itself once — the user's exact scenario.
+    cur->setText(QStringLiteral("其周期为 $2^{192} - 2^{32}$。\n\nAnd a bare $2$ alone.\n"));
+    QVERIFY(waitForCond(previewCur.get(), katexMarker, QStringLiteral("loaded")));
+    QCOMPARE(evalJs(previewCur.get(), QStringLiteral("typeof window.texmath")), QStringLiteral("function"));
+
+    // Opening a document whose only math is numeric loads KaTeX on first load.
+    KTextEditor::Document *doc = openDocument(QStringLiteral("成本 $10^3$ 元？\n"));
+    auto preview = makePreview(doc);
+    QVERIFY(waitForPageText(preview.get(), QStringLiteral("成本")));
+    QVERIFY(waitForCond(preview.get(), katexMarker, QStringLiteral("loaded")));
+
+    delete doc;
+    delete cur;
     if (oldDataDir.isNull()) {
         qunsetenv("KATEXDOWN_DATA_DIR");
     } else {
