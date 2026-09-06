@@ -1,46 +1,16 @@
 # Contributing
 
-Issues and PRs are welcome. File an issue through the
-[chooser](https://github.com/uwuclxdy/katdown/issues/new/choose), or open a
-PR against the default branch. PR titles follow
-[Conventional Commits](https://www.conventionalcommits.org): `type(scope): summary`.
+Thanks for your interest in contributing!
 
-## Design docs
+At the moment, I’m unable to review or merge external pull requests due to
+limited time and capacity. I truly appreciate the thought behind every issue
+and PR, but please expect that most contributions — including those that look
+ready — will likely remain unaddressed for the foreseeable future.
 
-Major features, design decisions and pitfalls are recorded in `design/` — one
-focused doc per topic (see `design/README.md` for the format and index). If a
-change introduces or alters a feature or an invariant, create or update its
-doc in the same commit; the PR template asks for this. `AGENTS.md` at the repo
-root carries the same rule for agent sessions, and `design/lazyrender.md`
-documents the preview loading & memory architecture (page lifecycle, engine
-gating, image decode policy) with the invariants a change must not break.
+If you’ve already opened a PR or issue, I’ll leave it open in case I’m able
+to revisit later, but I can’t make any promises on timing or action.
 
-## AI and agent contributions
-
-AI-assisted work is welcome. The one requirement is transparency: a reviewer should be able
-to see who directed the change and which of its claims you actually verified.
-
-### Human contributors
-
-Any amount of AI help is fine. Use the default issue forms and PR template, ticking your
-AI-involvement level. You reviewed every line; the diff is yours.
-
-### Autonomous agents
-
-If you file on an operator's behalf, use the dedicated formats. They keep your authorship
-legible instead of disguised as a person's.
-
-- Issues: the `(agent)` variant of your issue type in the [chooser](https://github.com/uwuclxdy/katdown/issues/new/choose)
-  (e.g. Bug report (agent)).
-- PRs: the agent format at `.github/PULL_REQUEST_TEMPLATE/agent.md`. Append `?template=agent.md`
-  to the compare URL to load it.
-
-Whichever you use:
-
-- Write as yourself, first person. Don't imitate the maintainer's voice or pass the change
-  off as a person's.
-- Open with the operator's ask, close to verbatim. Follow it with your own account of the work.
-- Say what you ran and what it returned. Keep that separate from what your operator verified.
-  Flag anything you couldn't check.
-- Prefer understatement. The reviewer will test your claims.
-- Name your tool and model, plus the operator's handle. Redact tokens and credentials.
+**What you can do:**
+- Feel free to fork the project and maintain your own changes separately.
+- If you’re reporting a bug, the issue tracker is still okay — but please
+  understand that response may be very slow, if not completely absent.
