@@ -144,3 +144,22 @@ html[data-pv-imgmode="saver"] .markdown-body img {
     border-radius: 3px;
   }
 }
+
+/* Printing. The exported standalone .html embeds this stylesheet (and so
+   does the live preview page), so a print rule here governs both. The
+   floating outline control is interactive-only chrome: browsers repeat
+   fixed-position elements on every printed page, so it must never reach
+   paper. The deep bottom padding on .markdown-body exists only to keep
+   content clear of the floating button on screen; in print it would leave
+   a tall empty band at the end of the document, so drop it back to the
+   regular gutter. */
+@media print {
+  #kdx-outline-btn,
+  #kdx-outline-panel {
+    display: none !important;
+  }
+
+  .markdown-body {
+    padding-bottom: 32px;
+  }
+}
