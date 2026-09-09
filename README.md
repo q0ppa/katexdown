@@ -88,12 +88,57 @@ Notes for Windows:
 - Kate must come from the [installer](https://kate-editor.org/get-it/); the
   Microsoft Store version is not supported.
 - Kate's own release series eventually moves to a newer Qt than a given
-  Katexdown release was built against; the installer then says so and you
-  fetch the matching Katexdown release.
-- The installer is built from `packaging/windows/katexdown.nsi` (via
-  `packaging/windows/build-installer.ps1`) in `.github/workflows/windows.yml` —
-  the only place with the Craft/MSVC 2022 toolchain needed to build the plugin
-  at all — and is verified against a real Kate install before it ships.
+  Katexdown installer was built against; the installer refuses that
+  combination (a mismatched plugin would otherwise silently never appear in
+  Kate's plugin list). Fetch a release built for your Kate — below says how
+  often that is needed and how to produce one.
+
+#### How the Windows release is produced (for maintainers and forks)
+
+No Windows build happens on anyone's laptop. Two GitHub Actions workflows run
+the moment you push a version tag (`vX.Y.Z`):
+
+- `.github/workflows/release.yml` creates the GitHub Release for the tag and
+  hard-fails if the tag does not match `project(... VERSION ...)` in
+  `CMakeLists.txt`.
+- `.github/workflows/windows.yml` builds, verifies, and attaches the Windows
+  installer. It runs on the same tag push, on demand via Actions → “Run
+  workflow”, and on PRs that touch the build inputs (a compile-only gate). Its
+  steps:
+  1. bootstraps [KDE Craft](https://community.kde.org/Craft) on a
+     `windows-2022` runner with MSVC 2022 — the same toolchain Kate's own
+     Windows build uses, so the plugin matches Kate's ABI;
+  2. pulls `ktexteditor` and Qt WebEngine from Craft's binary cache and builds
+     the plugin with CMake;
+  3. packages it: `packaging/windows/build-installer.ps1` stages the plugin
+     and the WebEngine runtime (`make-payload.ps1`, the authoritative file
+     list) and compiles `packaging/windows/katexdown.nsi` into
+     `katexdown-<version>-windows-x86_64.exe`. The version is read from
+     `CMakeLists.txt` and the Qt minor from Craft's own Qt6Core.dll — nothing
+     is hardcoded;
+  4. verifies it against a **real** Kate: downloads the newest Kate from KDE's
+     CDN, silently installs the exe into it, runs the render test, uninstalls,
+     and checks nothing was left behind;
+  5. attaches the exe to the Release.
+
+**What the maintainer does:** bump `project(... VERSION ...)` in
+`CMakeLists.txt` and keep `src/katexdown.json`'s `Version` in step (that one is
+what the in-app update check compares, so it must match too), then push a
+`v<version>` tag. CI produces the verified Windows installer and attaches it —
+no local Craft, no manual steps.
+
+**Why a given build eventually needs refreshing:** a plugin only loads into a
+Kate built on the *same Qt minor*, and the workflow builds against whatever Qt
+Kate's Windows build is currently on. When Kate's Windows Qt moves (roughly
+once or twice a year), the newest Kate stops accepting the previous installer,
+and the verify step above fails on that newest Kate — which is the signal.
+Re-run the workflow (a new tag, or Actions → Run workflow) and it pulls the
+current Craft Qt and produces an installer for the current Kate.
+
+Forks need only GitHub Actions enabled on the fork; the `release` and
+`windows` workflows use no secrets (only `publish-aur`, which is the
+Linux/AUR-only one, needs AUR credentials). Windows runs pull a few GB from
+files.kde.org, so expect an hour or two per run.
 
 ### macOS
 
