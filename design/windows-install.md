@@ -143,6 +143,12 @@ construction, exactly the staged tree.
 
 ## Test seams
 
+- The Windows job builds every test target (`BUILD_TESTING=ON`), so all tests must stay
+  MSVC-clean even though only `previewlifecycletest.exe` is executed there. That is why
+  `rendermemorytest`'s `unistd.h`/`sysconf(_SC_PAGESIZE)` are guarded by `Q_OS_UNIX` and its
+  page size falls back to a constant off-POSIX — the `/proc` RSS tests skip at runtime on
+  non-Linux via their `/proc/self/statm` existence check, but they still have to compile on
+  MSVC, which has no `unistd.h`.
 - The installer is **silent-installed into a freshly downloaded real Kate** in
   `.github/workflows/windows.yml` (`/S`), file placement is asserted, then
   `previewlifecycletest.exe` renders against that Kate with `PATH` restricted

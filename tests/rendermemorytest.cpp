@@ -32,7 +32,13 @@
 #include <QWebEnginePage>
 #include <QWebEngineView>
 
+// The /proc RSS reads need the page size, but unistd.h only exists on POSIX;
+// MSVC (Windows, where the test still has to compile in the Windows CI build)
+// has no unistd.h. The RSS tests skip at runtime off-Linux anyway, so on
+// non-POSIX builds pageSizeKb() is a constant that is never reached.
+#if defined(Q_OS_UNIX)
 #include <unistd.h>
+#endif
 
 #include <memory>
 
@@ -50,6 +56,15 @@ const QByteArray RedPng =
                         "70000000049454e44ae426082");
 
 // ---- Renderer RSS plumbing (Linux /proc) ----
+
+long pageSizeKb()
+{
+#if defined(Q_OS_UNIX)
+    return sysconf(_SC_PAGESIZE) / 1024;
+#else
+    return 4; // 4 KiB page; only ever used where /proc exists, which is Linux.
+#endif
+}
 
 bool procAvailable()
 {
@@ -75,7 +90,7 @@ long procRssKb(long pid)
     if (parts.size() < 2) {
         return -1;
     }
-    return parts[1].toLong() * (sysconf(_SC_PAGESIZE) / 1024);
+    return parts[1].toLong() * pageSizeKb();
 }
 
 void collectChildren(long pid, QSet<long> &out)
