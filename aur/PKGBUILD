@@ -12,7 +12,7 @@
 
 pkgname=katexdown-git
 _pkgbase=katexdown
-pkgver=0.2.0.r14.g7cf6f16
+pkgver=0.2.0.r15.gea78249
 pkgrel=1
 pkgdesc="Markdown preview side panel for Kate with KaTeX math and custom CSS (katdown fork)"
 arch=('x86_64')
@@ -30,9 +30,17 @@ sha256sums=('SKIP')
 
 prepare() {
   # Make the build match what is in the repository right now (uncommitted
-  # changes included). Skip bulky/dev dirs.
+  # changes included). Skip bulky/dev dirs AND .git: the overlay is only
+  # meant to refresh tracked file content. Copying .git over the makepkg
+  # work copy rewrites its origin to the repository's real remote (e.g.
+  # git@github.com:...) and its refs/reflog, so the NEXT makepkg run's
+  # "updating working copy" git fetch would hit GitHub over SSH instead of
+  # the local git+file source and fail (and it would silently build stale
+  # refs on top of that). makepkg's own clone of the file:// source already
+  # carries the committed state, so .git here can only ever hurt.
   cd "$srcdir/$_pkgbase"
   tar --exclude='./build*' --exclude='./runtime' --exclude='./aur' \
+      --exclude='./.git' \
       -C "$startdir/.." -cf - . | tar -xf -
 }
 

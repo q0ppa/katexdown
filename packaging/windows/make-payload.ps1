@@ -1,19 +1,21 @@
 <#
 .SYNOPSIS
-Assemble the Windows distribution: the plugin plus the Qt WebEngine runtime Kate does not ship.
+Stage the Windows distribution payload: the plugin plus the Qt WebEngine runtime Kate does not
+ship, laid out like a Kate install root. packaging/windows/katexdown.nsi then embeds this tree
+into the installer exe (File /r), so this script is the single authoritative file list.
 
 .DESCRIPTION
 The file list is explicit rather than whatever windeployqt produces, for two reasons. windeployqt
 deploys the closure a generic Qt app might need (QML debug tooling, geolocation backends, a PDF
-module, a bundled VC redist installer), roughly 42 MB of which katdown never touches. And it fails
-part way on a Craft layout, because it looks for the WebEngine .pak files under a resources\
+module, a bundled VC redist installer), roughly 42 MB of which katexdown never touches. And it
+fails part way on a Craft layout, because it looks for the WebEngine .pak files under a resources\
 subdirectory that Craft does not create.
 
 The list has two halves, and they need different evidence.
 
 DLLs are settled by import analysis: kept when they are a static import of Qt6WebEngineCore or
-Qt6WebEngineWidgets, dropped when the plugin still resolved every import with the file absent, on a
-real Kate install.
+Qt6WebEngineWidgets, dropped when the plugin still resolved every import with the file absent, on
+a real Kate install.
 
 The D3D shader compilers windeployqt offers (d3dcompiler_47.dll, dxcompiler.dll, dxil.dll) are
 deliberately not here. Windows ships d3dcompiler_47.dll in System32, so Chromium finds it without
@@ -29,31 +31,33 @@ pak (wrong directory) and `v8_context_snapshot.bin` (never copied at all, becaus
 list did not know about it). Do not add or remove anything in the data-file half on the strength of
 a load test.
 
-Anything Kate already ships is deliberately absent: install.ps1 refuses to overwrite files it did
+Anything Kate already ships is deliberately absent: the installer refuses to overwrite files it did
 not put there, so a payload that duplicated Kate's own Qt would refuse to install.
+
+This script is normally driven by packaging/windows/build-installer.ps1 (the recorded one-command
+recipe). Besides the payload it also emits <OutDir>\uninstall-payload.nsh — an NSIS fragment
+listing every file it staged, which katexdown.nsi includes as its uninstall Delete list, so that
+list is generated from the same source as the payload and cannot drift.
 
 .PARAMETER CraftRoot
 Craft installation the files come from (the one that built the plugin).
 
 .PARAMETER PluginDll
-Path to the built katdown.dll.
+Path to the built katexdown.dll.
 
 .PARAMETER OutDir
-Directory to assemble into. Created if absent, cleared if it already holds a payload.
-
-.PARAMETER Zip
-Optional path for a zip of the assembled tree.
+Directory to assemble into. Created if absent, cleared if it already holds a payload. The payload
+lands in <OutDir>\payload and the uninstall file list in <OutDir>\uninstall-payload.nsh.
 
 .EXAMPLE
-.\make-payload.ps1 -CraftRoot C:\CraftRoot -PluginDll build\bin\kf6\ktexteditor\katdown.dll -OutDir dist
+.\make-payload.ps1 -CraftRoot C:\CraftRoot -PluginDll build\bin\kf6\ktexteditor\katexdown.dll -OutDir dist
 #>
 #Requires -Version 5.1
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$CraftRoot,
     [Parameter(Mandatory)][string]$PluginDll,
-    [Parameter(Mandatory)][string]$OutDir,
-    [string]$Zip
+    [Parameter(Mandatory)][string]$OutDir
 )
 
 Set-StrictMode -Version Latest
@@ -85,8 +89,6 @@ $Files = [ordered]@{
     # logged "locale resources are not loaded" 166 times per run and found nothing.
     'translations\qtwebengine_locales\en-US.pak' = 'bin\translations\qtwebengine_locales\en-US.pak'
 }
-
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 if (-not (Test-Path $CraftRoot)) {
     throw "No Craft root at '$CraftRoot'."
@@ -125,30 +127,25 @@ foreach ($src in $Files.Keys) {
     $total += (Get-Item $to).Length
 }
 
-$pluginDest = Join-Path $payloadDir 'bin\kf6\ktexteditor\katdown.dll'
+$pluginDest = Join-Path $payloadDir 'bin\kf6\ktexteditor\katexdown.dll'
 New-Item -ItemType Directory -Path (Split-Path -Parent $pluginDest) -Force | Out-Null
 Copy-Item -LiteralPath $PluginDll -Destination $pluginDest -Force
 $total += (Get-Item $pluginDest).Length
 
-Copy-Item -LiteralPath (Join-Path $ScriptDir 'install.ps1') -Destination (Join-Path $OutDir 'install.ps1') -Force
-Copy-Item -LiteralPath (Join-Path $ScriptDir 'README.txt') -Destination (Join-Path $OutDir 'README.txt') -Force
+# Emit the NSIS fragment the installer's uninstaller !includes. It is generated from the same
+# $Files list that staged the payload, so the two can never drift (the alternative — a hand-kept
+# Delete list inside katexdown.nsi — was the one place payload and uninstall could disagree).
+$lines = New-Object System.Collections.Generic.List[string]
+$lines.Add('; Generated by make-payload.ps1 from the same list that staged the payload.')
+$lines.Add('; Relative paths, rooted at the Kate install root; consumed inside the Uninstall section.')
+foreach ($rel in $Files.Values) {
+    $lines.Add('  Delete "$INSTDIR\' + $rel + '"')
+}
+$lines.Add('  Delete "$INSTDIR\bin\kf6\ktexteditor\katexdown.dll"')
+$fragment = Join-Path $OutDir 'uninstall-payload.nsh'
+Set-Content -LiteralPath $fragment -Value $lines -Encoding Ascii
 
 $count = $Files.Count + 1
-Write-Host ("Assembled {0} files, {1:N0} bytes, into {2}" -f $count, $total, $payloadDir)
-
-if ($Zip) {
-    $zipDir = Split-Path -Parent $Zip
-    if ($zipDir -and -not (Test-Path $zipDir)) {
-        New-Item -ItemType Directory -Path $zipDir -Force | Out-Null
-    }
-    if (Test-Path $Zip) {
-        Remove-Item -LiteralPath $Zip -Force
-    }
-    # Compress into a temp file, never straight into $OutDir: the usual call site puts the zip
-    # inside the directory being zipped, and an archive that grows while it is its own input is a
-    # good way to ship a corrupt one.
-    $staging = Join-Path ([System.IO.Path]::GetTempPath()) ("katdown-" + [System.IO.Path]::GetRandomFileName() + ".zip")
-    Compress-Archive -Path (Join-Path $OutDir '*') -DestinationPath $staging -CompressionLevel Optimal
-    Move-Item -LiteralPath $staging -Destination $Zip -Force
-    Write-Host ("Wrote {0} ({1:N0} bytes)" -f $Zip, (Get-Item $Zip).Length)
-}
+Write-Host ("Staged {0} files, {1:N0} bytes, into {2}" -f $count, $total, $payloadDir)
+Write-Host ("Wrote the uninstall file list to {0}" -f $fragment)
+Write-Host 'Next: packaging/windows/build-installer.ps1 turns this payload into the installer exe.'

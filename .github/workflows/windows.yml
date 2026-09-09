@@ -157,22 +157,17 @@ jobs:
 
       - name: package
         run: |
-          $ErrorActionPreference = 'Stop'
-          & $env:VSDEVSH -SkipAutomaticLocation -Arch amd64 -HostArch amd64
-          $env:ANDROID_SDK_ROOT = $null
-          . C:\CraftRoot\craft\craftenv.ps1
-          # craftenv.ps1 leaves the shell sitting in C:\CraftRoot, so anything relative
-          # after this resolves against Craft rather than the checkout.
+          # Everything below lives in build-installer.ps1: it stages the payload (make-payload.ps1),
+          # derives the version from CMakeLists.txt and the Qt minor from Craft's Qt6Core.dll, finds
+          # or installs makensis, and compiles packaging/windows/katexdown.nsi into the exe. Keeping
+          # the recipe in a script means a manual build and this CI run cannot diverge.
           Set-Location $env:GITHUB_WORKSPACE
-          $match = Select-String -Path CMakeLists.txt -Pattern '^project\(.*VERSION\s+([0-9.]+)'
-          if (-not $match) { throw 'could not read the project version out of CMakeLists.txt' }
-          $version = $match.Matches[0].Groups[1].Value
-          .\packaging\windows\make-payload.ps1 `
+          .\packaging\windows\build-installer.ps1 `
             -CraftRoot C:\CraftRoot `
-            -PluginDll build\bin\kf6\ktexteditor\katdown.dll `
-            -OutDir dist `
-            -Zip "dist\katdown-$version-windows-x86_64.zip"
-          Get-ChildItem dist\*.zip | ForEach-Object { "{0}  {1:N0} bytes" -f $_.Name, $_.Length }
+            -PluginDll build\bin\kf6\ktexteditor\katexdown.dll `
+            -OutDir dist
+          if ($LASTEXITCODE -ne 0) { throw 'build-installer.ps1 failed' }
+          Get-ChildItem dist\katexdown-*.exe | ForEach-Object { "{0}  {1:N0} bytes" -f $_.Name, $_.Length }
 
       # The packaged artifact is verified against a REAL Kate install, not against Craft's own
       # complete Qt. That distinction is the whole value of this step: the payload once shipped
@@ -219,11 +214,18 @@ jobs:
           if (-not (Test-Path "$kate\bin\kate.exe")) { throw "Kate did not install to $kate" }
           Write-Host ("Kate's Qt: " + (Get-Item "$kate\bin\Qt6Core.dll").VersionInfo.FileVersion)
 
-          # install.ps1 throws on failure rather than setting an exit code, and
-          # $ErrorActionPreference is Stop, so a failure fails the step on its own. Do not add a
-          # $LASTEXITCODE check here: it still holds the last NATIVE command's code and would
-          # report a stale failure.
-          & .\dist\install.ps1 -KateDir $kate
+          # Install the built installer silently into the real Kate, and check what it claims to
+          # have placed before any code runs against it.
+          $setup = Get-ChildItem dist\katexdown-*.exe | Select-Object -First 1
+          if (-not $setup) { throw 'no installer exe under dist\' }
+          $proc = Start-Process -FilePath $setup.FullName -ArgumentList '/S' -Wait -PassThru
+          if ($proc.ExitCode -ne 0) {
+            Write-Host ("Kate's Qt: " + (Get-Item "$kate\bin\Qt6Core.dll").VersionInfo.FileVersion)
+            throw "installer exited $($proc.ExitCode)"
+          }
+          foreach ($must in @("$kate\bin\Qt6WebEngineCore.dll", "$kate\bin\kf6\ktexteditor\katexdown.dll")) {
+            if (-not (Test-Path $must)) { throw "installer did not place $must" }
+          }
 
           Copy-Item build\bin\previewlifecycletest.exe "$kate\bin\" -Force
           $env:QT_QPA_PLATFORM = 'offscreen'
@@ -247,10 +249,19 @@ jobs:
           if ($code -ne 0) { throw "previewlifecycletest exited $code against the packaged install" }
           Write-Host 'render test passed against the packaged Kate install'
 
+          # Uninstall must remove exactly what the installer put there. Apps & features runs this
+          # same uninstaller; /S only skips the confirm page.
+          $proc = Start-Process -FilePath "$kate\katexdown-uninstall.exe" -ArgumentList '/S' -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { throw "uninstaller exited $($proc.ExitCode)" }
+          foreach ($gone in @("$kate\bin\Qt6WebEngineCore.dll", "$kate\bin\kf6\ktexteditor\katexdown.dll")) {
+            if (Test-Path $gone) { throw "uninstaller left $gone behind" }
+          }
+          Write-Host 'uninstall removed the payload files'
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
-          name: katdown-windows-x86_64
-          path: dist/*.zip
+          name: katexdown-windows-x86_64
+          path: dist/*.exe
           if-no-files-found: error
 
       - name: attach to release
@@ -269,5 +280,5 @@ jobs:
             Start-Sleep -Seconds 15
           }
           if (-not $found) { throw "release $tag never appeared; is release.yml failing?" }
-          gh release upload $tag (Get-ChildItem dist\*.zip).FullName --repo $env:GITHUB_REPOSITORY --clobber
+          gh release upload $tag (Get-ChildItem dist\*.exe).FullName --repo $env:GITHUB_REPOSITORY --clobber
           if ($LASTEXITCODE -ne 0) { throw 'upload failed' }

@@ -16,3 +16,7 @@ compile_commands.json
 /aur/pkg/
 /aur/*.pkg.tar.*
 /aur/katexdown/
+
+# Windows installer build output (packaging/windows/make-payload.ps1 + katexdown.nsi)
+/dist/
+/packaging/windows/*.exe

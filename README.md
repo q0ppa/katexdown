@@ -67,24 +67,33 @@ Enable the plugin after installing: Settings -> Configure Kate -> Plugins -> che
 
 ### Windows
 
-Building on Windows needs [KDE Craft](https://community.kde.org/Craft) with MSVC
-2022 (the plugin must match the ABI of Kate's own Qt build). The repository
-contains the upstream Windows workflow (`.github/workflows/windows.yml`) and the
-installer script (`packaging/windows/install.ps1`); if you push this fork to
-GitHub and enable Actions, each tagged release produces a zip that installs
-with one command in an **elevated** PowerShell:
+Download `katexdown-<version>-windows-x86_64.exe` from the latest release and
+double-click it. Confirm the UAC prompt and you are done — no PowerShell, no
+unzipping, no commands to type:
 
-```powershell
-powershell -ExecutionPolicy Bypass -File install.ps1     # -KateDir "D:\Kate" if needed
-```
+- The installer finds Kate automatically (or lets you browse to it) and
+  refuses the Microsoft Store version, which cannot host plugins.
+- It refuses a Kate whose Qt version does not match the build, because a
+  mismatched plugin would otherwise silently never appear in Kate's plugin
+  list.
+- Kate for Windows ships no Qt WebEngine, so the installer puts the runtime
+  next to `kate.exe` — that is where Windows resolves plugin dependencies
+  from, and it is under Program Files, which is why the installer asks for
+  administrator approval.
+
+Uninstall from Windows Settings -> Apps -> Katexdown, like any other app.
 
 Notes for Windows:
 
 - Kate must come from the [installer](https://kate-editor.org/get-it/); the
   Microsoft Store version is not supported.
-- Kate for Windows ships no Qt WebEngine, so the zip packs it (about 90 MB,
-  ~220 MB unpacked) and installs it next to `kate.exe`, where Windows looks
-  for plugin dependencies.
+- Kate's own release series eventually moves to a newer Qt than a given
+  Katexdown release was built against; the installer then says so and you
+  fetch the matching Katexdown release.
+- The installer is built from `packaging/windows/katexdown.nsi` (via
+  `packaging/windows/build-installer.ps1`) in `.github/workflows/windows.yml` —
+  the only place with the Craft/MSVC 2022 toolchain needed to build the plugin
+  at all — and is verified against a real Kate install before it ships.
 
 ### macOS
 
