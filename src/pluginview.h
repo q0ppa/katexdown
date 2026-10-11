@@ -13,6 +13,7 @@ class QAction;
 class QEvent;
 class PreviewWidget;
 class QWidget;
+class QKeyEvent;
 
 namespace KTextEditor
 {
@@ -39,7 +40,8 @@ class View;
  * toggling via kate's own "Show Preview" menu entry or the sidebar button
  * obeys the same rules as the Katexdown action. The freeze/release behavior
  * lives in PreviewWidget (panelClosed/panelOpened); hiding only forwards the
- * policy decision here.
+ * policy decision here. When reading navigation is enabled, this object also
+ * arbitrates Ctrl-pane focus using the actual editor/preview geometry.
  */
 class PluginView : public QObject, public KXMLGUIClient, public KTextEditor::SessionConfigInterface
 {
@@ -66,6 +68,7 @@ private Q_SLOTS:
     void exportPreviewHtml();
     void onSettingsChanged();
     void activatePanel();
+    void moveFocusFromPreview(Qt::Key key);
 
 private:
     bool currentIsMarkdown(KTextEditor::Document *doc) const;
@@ -75,6 +78,9 @@ private:
     void onPanelShown();
     void onPanelHidden();
     Settings::LoadingMode loadingMode() const;
+    bool handleEditorDirectionalEvent(QObject *watched, QEvent *event);
+    QWidget *paneForWidget(QWidget *widget) const;
+    QWidget *directionalPane(QWidget *source, Qt::Key key) const;
 
     KTextEditor::MainWindow *m_mainWindow = nullptr;
     KTextEditor::Plugin *m_plugin = nullptr;

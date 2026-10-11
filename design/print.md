@@ -52,6 +52,9 @@ covers any other future print source.
   it either gets hidden in the same `@media print` block, or never becomes
   part of printed output by construction.
 - The on-screen outline control (live page and exported file) is unchanged.
+- The outline glyph is explicitly filled with `currentColor`, so it inherits
+  the runtime button color in light, dark, and custom themes rather than
+  falling back to SVG's black default.
 - The print block must not force a light palette: a doc exported from a dark
   editor theme prints dark (browser "background graphics" on) just as it
   looked on screen; remapping only some vars while `hljs` token colors stay
@@ -69,6 +72,9 @@ covers any other future print source.
 - **Reserved padding is screen-only.** The 96px/64px bottom padding on
   `.markdown-body` is clearance for the floating button; copying it into
   print output leaves a blank band on the final page.
+- **SVG `path` fill is not the CSS `color`.** Setting `color` on the button
+  does not recolor an unstyled path; the scoped `fill: currentColor` rule is
+  needed for the outline glyph to follow the same theme variables.
 
 ## Test seams
 
@@ -76,8 +82,9 @@ No automated test covers printing (headless QWebEngine has no paper
 layout); `renderfeaturestest.cpp` exercises the on-screen outline
 (`outlineListsConfiguredHeadings`, "outline off" case) via
 `getComputedStyle(...).display` — screen media, unaffected by the print
-rule. The print behavior is verified by opening an exported `.html` in a
-browser and printing.
+rule. `outlineButtonTracksTheme` also compares the button and SVG path
+computed colors across live light/dark changes. The print behavior is verified
+by opening an exported `.html` in a browser and printing.
 
 ## Where it lives
 

@@ -47,8 +47,52 @@ build instead of compiling the new code.
 Then enable it: Settings -> Configure Kate -> Plugins -> check **Katexdown**.
 
 > [!NOTE]
-> If you later publish this fork on GitHub, point `source=` in `aur/PKGBUILD`
-> at your repository and the same PKGBUILD can go to the AUR as-is.
+> `aur/PKGBUILD` is intentionally a repository-local development recipe. It
+> uses a `git+file://` source and overlays the current working tree, so it is
+> not the recipe to copy into an AUR checkout.
+
+### Arch Linux testing package (Vim navigation)
+
+The `testing/vim-navigation` branch has a separate, clean-source PKGBUILD for
+real Kate testing. This is an AUR-style `makepkg` build from GitHub, **not an
+AUR-published package**:
+
+```bash
+git clone --single-branch --branch testing/vim-navigation \
+  https://github.com/FilthyS/katexdown.git katexdown-vim-testing
+cd katexdown-vim-testing/aur/testing
+makepkg -C -f -si
+```
+
+`-s` asks pacman to install missing dependencies and `-i` installs the package;
+makepkg may ask for authorization through pacman. Run those commands as a
+normal user and allow the package manager to request privileges when needed.
+The package is named `katexdown-testing-git`, conflicts with the stable
+`katexdown-git` package, and cannot be installed alongside it because both
+install the same Kate plugin. The Vim-style reading option remains off until
+enabled in Kate's plugin configuration.
+
+To roll back, keep the package archive from the previous install, then run:
+
+```bash
+sudo pacman -U /path/to/previous/katexdown-git-*.pkg.tar.zst
+# or remove only the testing package if returning to an uninstalled state:
+sudo pacman -R katexdown-testing-git
+```
+
+The first command's conflict prompt replaces the testing package with the
+previous package. Do not remove shared Qt/KF6 dependencies as part of this
+rollback unless they are no longer needed by another application.
+
+#### Testing status and limits
+
+At the time this branch was published, the final headless CTest run was **6/6
+tests passing**. The render-feature suite reports **21 passed** plus **2
+KaTeX-missing skips** when the optional runtime assets are absent. The reverse
+preview-to-editor native key path still needs a manual test in a real Kate
+window. An earlier aggregate memory scroll/restore check once reported
+`1200 -> 0`; reruns and the final full run passed, so it is recorded as a
+transient observation rather than a known failure.
 
 ### Build from source (any Linux)
 

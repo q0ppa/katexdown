@@ -89,6 +89,136 @@
     return kdxDecodeCount + ":" + kdxDecodeBytes;
   };
 
+  // Optional Vim-style reading navigation. Qt claims these keys before Kate's
+  // shortcut map; the page owns the actual scroll target so nested horizontal
+  // containers and editable controls can be handled with DOM knowledge.
+  var kdxReadingNavigation = false;
+  var kdxHoveredTarget = null;
+  var kdxNavigation = null;
+  var kdxNavigationPending = [];
+  window.__setReadingNavigation = function (enabled) {
+    kdxReadingNavigation = !!enabled;
+  };
+  document.addEventListener(
+    "mousemove",
+    function (e) {
+      kdxHoveredTarget = e.target;
+    },
+    true
+  );
+  function kdxEditableTarget(target) {
+    return !!(
+      target &&
+      (target.isContentEditable ||
+        (target.closest &&
+          target.closest("input, textarea, select, button, [contenteditable='true']")))
+    );
+  }
+  function kdxLiveTarget(target) {
+    return !!(
+      target &&
+      target.ownerDocument === document &&
+      target.isConnected &&
+      document.documentElement.contains(target)
+    );
+  }
+  function kdxHorizontalContainer(target) {
+    if (!kdxLiveTarget(target)) {
+      return null;
+    }
+    for (var el = target; el && el !== document.body; el = el.parentElement) {
+      var style = window.getComputedStyle(el);
+      if (
+        el.scrollWidth > el.clientWidth &&
+        (style.overflowX === "auto" ||
+          style.overflowX === "scroll" ||
+          style.overflowX === "overlay" ||
+          el === document.documentElement)
+      ) {
+        return el;
+      }
+    }
+    return null;
+  }
+  function kdxHorizontalScroll(delta) {
+    if (!kdxLiveTarget(kdxHoveredTarget)) {
+      kdxHoveredTarget = null;
+    }
+    var target = kdxHorizontalContainer(kdxHoveredTarget) ||
+      kdxHorizontalContainer(document.activeElement);
+    if (target) {
+      target.scrollLeft += delta;
+      return;
+    }
+    var root = document.scrollingElement || document.documentElement;
+    if (root.scrollWidth > root.clientWidth) {
+      window.scrollBy(delta, 0);
+    }
+  }
+  function kdxRequestDirectional(key) {
+    var host = ensureHostNavigation();
+    var qtKey = key.toUpperCase().charCodeAt(0);
+    if (host && typeof host.request === "function") {
+      host.request(qtKey);
+    } else {
+      kdxNavigationPending.push(qtKey);
+    }
+  }
+  document.addEventListener(
+    "keydown",
+    function (e) {
+      if (
+        !kdxReadingNavigation ||
+        e.defaultPrevented ||
+        e.metaKey ||
+        e.altKey
+      ) {
+        return;
+      }
+      if (e.ctrlKey) {
+        if (
+          !kdxEditableTarget(e.target) &&
+          (e.key === "h" || e.key === "j" || e.key === "k" || e.key === "l")
+        ) {
+          e.preventDefault();
+          kdxRequestDirectional(e.key);
+        }
+        return;
+      }
+      if (kdxEditableTarget(e.target)) {
+        return;
+      }
+      var delta;
+      switch (e.key) {
+        case "j":
+          delta = 40;
+          break;
+        case "k":
+          delta = -40;
+          break;
+        case "n":
+          delta = Math.max(1, Math.floor(window.innerHeight * 0.85));
+          break;
+        case "p":
+          delta = -Math.max(1, Math.floor(window.innerHeight * 0.85));
+          break;
+        case "h":
+          kdxHorizontalScroll(-40);
+          e.preventDefault();
+          return;
+        case "l":
+          kdxHorizontalScroll(40);
+          e.preventDefault();
+          return;
+        default:
+          return;
+      }
+      e.preventDefault();
+      window.scrollBy(0, delta);
+    },
+    true
+  );
+
   // A code fence larger than this many characters is rendered as plain
   // escaped text instead of being tokenized by highlight.js. Tokenizing turns
   // every token into a <span>, so an oversized fence (a minified bundle or a
@@ -351,6 +481,9 @@
     if (!el) {
       return;
     }
+    // #content is replaced below; a hovered descendant from the old tree must
+    // not retain detached DOM or select a stale horizontal scroller.
+    kdxHoveredTarget = null;
     var fm = frontMatterTable(current);
     el.innerHTML = (fm ? fm.html : "") + md.render(fm ? fm.body : current);
     // A re-render rebuilds the image DOM, so the images it creates decode as a
@@ -845,27 +978,62 @@
   // ---------------------------------------------------------------------
   var codeCopyEnabled = true;
 
-  // Host clipboard bridge (the "kdxClipboard" QWebChannel object registered by
-  // PreviewWidget). An exported standalone .html has no qt.webChannelTransport
-  // (and no registered object), so the page then uses the browser APIs below.
+  // Host bridges (registered by PreviewWidget). An exported standalone .html
+  // has no qt.webChannelTransport (and no registered objects), so clipboard
+  // falls back to the browser APIs and directional requests simply do nothing.
   var kdxClipboard = null;
   var kdxClipboardRequested = false;
+  var kdxChannel = null;
+  var kdxChannelRequested = false;
+  var kdxChannelCallbacks = [];
+
+  function ensureHostChannel(ready) {
+    if (kdxChannel) {
+      ready(kdxChannel);
+      return;
+    }
+    kdxChannelCallbacks.push(ready);
+    if (!kdxChannelRequested && window.QWebChannel && window.qt && window.qt.webChannelTransport) {
+      kdxChannelRequested = true;
+      try {
+        new QWebChannel(window.qt.webChannelTransport, function (channel) {
+          kdxChannel = channel;
+          var callbacks = kdxChannelCallbacks;
+          kdxChannelCallbacks = [];
+          callbacks.forEach(function (callback) {
+            callback(channel);
+          });
+        });
+      } catch (e) {
+        kdxChannelRequested = false;
+        kdxChannelCallbacks = [];
+      }
+    }
+  }
 
   function ensureHostClipboard() {
     if (kdxClipboardRequested) {
       return kdxClipboard;
     }
     kdxClipboardRequested = true;
-    if (window.QWebChannel && window.qt && window.qt.webChannelTransport) {
-      try {
-        new QWebChannel(window.qt.webChannelTransport, function (channel) {
-          kdxClipboard = channel.objects.kdxClipboard || null;
-        });
-      } catch (e) {
-        kdxClipboard = null;
-      }
-    }
+    ensureHostChannel(function (channel) {
+      kdxClipboard = channel.objects.kdxClipboard || null;
+    });
     return kdxClipboard;
+  }
+
+  function ensureHostNavigation() {
+    ensureHostChannel(function (channel) {
+      kdxNavigation = channel.objects.kdxNavigation || null;
+      if (kdxNavigation && typeof kdxNavigation.request === "function") {
+        var pending = kdxNavigationPending;
+        kdxNavigationPending = [];
+        pending.forEach(function (key) {
+          kdxNavigation.request(key);
+        });
+      }
+    });
+    return kdxNavigation;
   }
 
   // The handshake is asynchronous, but it starts at page setup, long before a

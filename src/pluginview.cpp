@@ -2,6 +2,7 @@
 #include "previewwidget.h"
 
 #include <QAction>
+#include <QApplication>
 #include <QDebug>
 #include <QDesktopServices>
 #include <QEvent>
@@ -10,9 +11,13 @@
 #include <QFileInfo>
 #include <QIcon>
 #include <QKeySequence>
+#include <QKeyEvent>
 #include <QTimer>
+#include <QtMath>
 #include <QUrl>
 #include <QVBoxLayout>
+
+#include <limits>
 
 #include <KActionCollection>
 #include <KConfigGroup>
@@ -68,6 +73,7 @@ PluginView::PluginView(KTextEditor::Plugin *plugin, KTextEditor::MainWindow *mai
     connect(m_mainWindow, &KTextEditor::MainWindow::viewChanged, this, &PluginView::followActiveView);
     connect(m_mainWindow, &KTextEditor::MainWindow::viewChanged, this, &PluginView::updateActionState);
     connect(Settings::self(), &Settings::changed, this, &PluginView::onSettingsChanged);
+    qApp->installEventFilter(this);
 
     // The tool-view shell (plain QWidget, negligible cost) always exists so
     // kate's sidebar button, View menu entry and session restore work. The
@@ -83,6 +89,7 @@ PluginView::PluginView(KTextEditor::Plugin *plugin, KTextEditor::MainWindow *mai
 
 PluginView::~PluginView()
 {
+    qApp->removeEventFilter(this);
     m_mainWindow->guiFactory()->removeClient(this);
     // The tool view is ours to delete (kate's own preview plugin does the
     // same); this unregisters it from the MDI and destroys any preview +
@@ -145,6 +152,7 @@ bool PluginView::ensurePreview()
     }
     KTextEditor::View *view = m_mainWindow->activeView();
     m_preview = new PreviewWidget(m_mainWindow, view, view ? view->document() : nullptr, m_toolView);
+    connect(m_preview, &PreviewWidget::directionalFocusRequested, this, &PluginView::moveFocusFromPreview);
     if (qEnvironmentVariableIsSet("KATEXDOWN_DEBUG")) {
         qDebug() << "[katexdown] created preview widget" << m_preview
                  << "| children under tool view:" << m_toolView->findChildren<PreviewWidget *>().size()
@@ -164,6 +172,131 @@ bool PluginView::ensurePreview()
     return true;
 }
 
+QWidget *PluginView::paneForWidget(QWidget *widget) const
+{
+    if (!widget) {
+        return nullptr;
+    }
+    if (m_preview && (widget == m_preview || m_preview->isAncestorOf(widget))) {
+        return m_preview;
+    }
+    if (!m_mainWindow) {
+        return nullptr;
+    }
+    for (KTextEditor::View *editor : m_mainWindow->views()) {
+        if (!editor) {
+            continue;
+        }
+        if (widget != editor && !editor->isAncestorOf(widget)) {
+            continue;
+        }
+        // Find/search bars and other auxiliary fields can be descendants of
+        // the editor's widget hierarchy. They own Ctrl shortcuts themselves;
+        // only the actual KTextEditor text surface is a pane-navigation source.
+        for (QWidget *part = widget; part && part != editor; part = part->parentWidget()) {
+            if (part->inherits("QLineEdit") || part->inherits("QTextEdit") || part->inherits("QPlainTextEdit")
+                || part->inherits("QComboBox") || part->inherits("QAbstractSpinBox")) {
+                return nullptr;
+            }
+        }
+        return editor;
+    }
+    return nullptr;
+}
+
+QWidget *PluginView::directionalPane(QWidget *source, Qt::Key key) const
+{
+    if (!source) {
+        return nullptr;
+    }
+    QWidget *best = nullptr;
+    qreal bestScore = std::numeric_limits<qreal>::max();
+    const QPoint sourceCenter = source->mapTo(m_mainWindow->window(), source->rect().center());
+    QList<QWidget *> candidates;
+    if (m_mainWindow) {
+        for (KTextEditor::View *view : m_mainWindow->views()) {
+            candidates.append(view);
+        }
+    }
+    candidates.append(m_preview);
+    for (QWidget *candidate : candidates) {
+        if (!candidate || candidate == source || !candidate->isVisible() || !candidate->isEnabled()) {
+            continue;
+        }
+        const QPoint center = candidate->mapTo(m_mainWindow->window(), candidate->rect().center());
+        const int dx = center.x() - sourceCenter.x();
+        const int dy = center.y() - sourceCenter.y();
+        const int primary = (key == Qt::Key_H || key == Qt::Key_L) ? dx : dy;
+        const int secondary = (key == Qt::Key_H || key == Qt::Key_L) ? dy : dx;
+        const bool forward = (key == Qt::Key_H || key == Qt::Key_K) ? primary < 0 : primary > 0;
+        if (!forward) {
+            continue;
+        }
+        // Only positive distance in the requested half-plane is eligible.
+        // Score the actual distance, not the signed primary coordinate:
+        // multiplying a negative primary made a farther-left/up pane win.
+        // A modest perpendicular penalty keeps diagonal layouts intuitive.
+        const qreal distance = qSqrt(qreal(dx * dx + dy * dy));
+        const qreal score = distance + qAbs(qreal(secondary)) * 0.5;
+        if (score < bestScore) {
+            bestScore = score;
+            best = candidate;
+        }
+    }
+    return best;
+}
+
+void PluginView::moveFocusFromPreview(Qt::Key key)
+{
+    if (!Settings::self()->vimReadingNavigation() || !m_preview) {
+        return;
+    }
+    if (QWidget *destination = directionalPane(m_preview, key)) {
+        destination->setFocus(Qt::OtherFocusReason);
+    }
+}
+
+bool PluginView::handleEditorDirectionalEvent(QObject *watched, QEvent *event)
+{
+    if (!Settings::self()->vimReadingNavigation()
+        || (event->type() != QEvent::ShortcutOverride && event->type() != QEvent::KeyPress)) {
+        return false;
+    }
+    auto *keyEvent = static_cast<QKeyEvent *>(event);
+    if (keyEvent->modifiers() != Qt::ControlModifier
+        || (keyEvent->key() != Qt::Key_H && keyEvent->key() != Qt::Key_J && keyEvent->key() != Qt::Key_K
+            && keyEvent->key() != Qt::Key_L)) {
+        return false;
+    }
+    QWidget *focus = qobject_cast<QWidget *>(watched);
+    if (!focus) {
+        focus = QApplication::focusWidget();
+    }
+    QWidget *source = paneForWidget(focus);
+    // This is the application-wide filter, so it must only arbitrate events
+    // that originated in an editor pane. Preview descendants are deliberately
+    // mapped to m_preview by paneForWidget(), but their ShortcutOverride and
+    // KeyPress events belong to PreviewWidget and the DOM (which knows about
+    // editable targets) instead.
+    if (!source || source == m_preview) {
+        return false;
+    }
+    QWidget *destination = directionalPane(source, static_cast<Qt::Key>(keyEvent->key()));
+    if (!destination) {
+        return false;
+    }
+    if (event->type() == QEvent::ShortcutOverride) {
+        event->accept();
+        return true;
+    }
+    if (destination == m_preview) {
+        m_preview->focusContent(Qt::OtherFocusReason);
+    } else {
+        destination->setFocus(Qt::OtherFocusReason);
+    }
+    return true;
+}
+
 void PluginView::destroyPreview()
 {
     if (qEnvironmentVariableIsSet("KATEXDOWN_DEBUG")) {
@@ -176,6 +309,9 @@ void PluginView::destroyPreview()
 // button and session restore all funnel through show/hide events).
 bool PluginView::eventFilter(QObject *watched, QEvent *event)
 {
+    if (handleEditorDirectionalEvent(watched, event)) {
+        return true;
+    }
     if (watched == m_toolView) {
         switch (event->type()) {
         case QEvent::Show:

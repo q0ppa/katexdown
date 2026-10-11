@@ -50,6 +50,32 @@ public Q_SLOTS:
 };
 
 /**
+ * QWebChannel bridge for Ctrl+h/j/k/l. The page owns the DOM decision: it
+ * never calls this for an editable target, and does call it for a normal page
+ * target after preventing the browser's default handling.
+ */
+class DirectionalNavigationBridge : public QObject
+{
+    Q_OBJECT
+public:
+    explicit DirectionalNavigationBridge(QObject *parent = nullptr)
+        : QObject(parent)
+    {
+    }
+
+Q_SIGNALS:
+    void directionRequested(int key);
+
+public Q_SLOTS:
+    void request(int key)
+    {
+        if (key == Qt::Key_H || key == Qt::Key_J || key == Qt::Key_K || key == Qt::Key_L) {
+            Q_EMIT directionRequested(key);
+        }
+    }
+};
+
+/**
  * A single Markdown preview tab: a QWebEngineView fed by a self-contained HTML
  * document. Source text is pushed to the page on every change; theming is driven
  * from the active editor theme (Application mode) or GitHub's palette.
@@ -96,9 +122,18 @@ public:
     void panelClosed(bool releaseWhenIdle);
     void panelOpened();
 
+    // Focus the actual WebEngine input widget, not this geometry/container
+    // widget. The target is resolved on every call because QWebEngineView can
+    // replace its focus proxy during a load.
+    bool focusContent(Qt::FocusReason reason = Qt::OtherFocusReason);
+
 Q_SIGNALS:
     // Emitted once the standalone HTML file has been written to path.
     void exportFinished(const QString &path);
+    // Requests pane focus movement. PluginView resolves the destination from
+    // the real pane geometry; the preview itself does not assume a left/right
+    // layout.
+    void directionalFocusRequested(Qt::Key key);
 
 public Q_SLOTS:
     void applyTheme();
@@ -133,6 +168,7 @@ private Q_SLOTS:
     // into the page. The button lives in the DOM, so the setting also decides
     // whether an export carries it.
     void applyCodeCopy();
+    void applyReadingNavigation();
     // Periodic policy while the panel is closed (freeze on close, discard a
     // long-closed LazyKeep page) and while it is open (renderer-memory
     // maintenance: once the estimate passes a budget and the preview has been

@@ -64,6 +64,7 @@ void Settings::load()
     m_loadRemoteMedia = cfg.readEntry("LoadRemoteMedia", false);
     m_useGithubCss = cfg.readEntry("GithubCss", true);
     m_codeCopyButton = cfg.readEntry("CodeCopyButton", true);
+    m_vimReadingNavigation = cfg.readEntry("VimReadingNavigation", false);
     m_loadingMode = static_cast<Settings::LoadingMode>(cfg.readEntry("LoadingMode", int(LazyKeep)));
     const QString imgMode = cfg.readEntry("ImageMode", QStringLiteral("auto"));
     if (imgMode == QLatin1String("saver")) {
@@ -97,6 +98,7 @@ void Settings::save() const
     cfg.writeEntry("LoadRemoteMedia", m_loadRemoteMedia);
     cfg.writeEntry("GithubCss", m_useGithubCss);
     cfg.writeEntry("CodeCopyButton", m_codeCopyButton);
+    cfg.writeEntry("VimReadingNavigation", m_vimReadingNavigation);
     cfg.writeEntry("LoadingMode", int(m_loadingMode));
     const char *imgMode = m_imageMode == MemorySaver ? "saver" : m_imageMode == DecodeAll ? "eager" : "auto";
     cfg.writeEntry("ImageMode", QString::fromLatin1(imgMode));
@@ -157,6 +159,16 @@ void Settings::setCodeCopyButton(bool enabled)
         return;
     }
     m_codeCopyButton = enabled;
+    save();
+    Q_EMIT changed();
+}
+
+void Settings::setVimReadingNavigation(bool enabled)
+{
+    if (m_vimReadingNavigation == enabled) {
+        return;
+    }
+    m_vimReadingNavigation = enabled;
     save();
     Q_EMIT changed();
 }

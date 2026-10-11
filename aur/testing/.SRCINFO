@@ -1,0 +1,26 @@
+pkgbase = katexdown-testing-git
+	pkgdesc = TESTING: Markdown preview side panel for Kate with Vim-style reading navigation
+	pkgver = 0.3.6.r0.gtesting
+	pkgrel = 1
+	url = https://github.com/FilthyS/katexdown/tree/testing/vim-navigation
+	arch = x86_64
+	license = GPL-3.0-or-later
+	makedepends = git
+	makedepends = cmake
+	makedepends = extra-cmake-modules
+	depends = ktexteditor
+	depends = syntax-highlighting
+	depends = kxmlgui
+	depends = kconfig
+	depends = ki18n
+	depends = kcoreaddons
+	depends = qt6-base
+	depends = qt6-webchannel
+	depends = qt6-webengine
+	provides = katexdown
+	conflicts = katexdown
+	conflicts = katexdown-git
+	source = katexdown::git+https://github.com/FilthyS/katexdown.git#branch=testing/vim-navigation
+	sha256sums = SKIP
+
+pkgname = katexdown-testing-git

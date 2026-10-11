@@ -16,10 +16,13 @@
 #include "previewwidget.h"
 
 #include <QAction>
+#include <QApplication>
 #include <QDeadlineTimer>
 #include <QDir>
 #include <QFile>
 #include <QIcon>
+#include <QKeyEvent>
+#include <QLineEdit>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QUrl>
@@ -167,6 +170,30 @@ public Q_SLOTS:
         return !toolShown;
     }
 };
+
+// Installed before PluginView so that it is reached only when PluginView's
+// application-wide filter declines an event. This distinguishes the global
+// editor router from PreviewWidget's own input filter.
+class ApplicationEventProbe : public QObject
+{
+public:
+    QObject *target = nullptr;
+    int shortcutOverrideCount = 0;
+    int keyPressCount = 0;
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        if (watched == target) {
+            if (event->type() == QEvent::ShortcutOverride) {
+                ++shortcutOverrideCount;
+            } else if (event->type() == QEvent::KeyPress) {
+                ++keyPressCount;
+            }
+        }
+        return QObject::eventFilter(watched, event);
+    }
+};
 } // namespace
 
 // Evaluate one expression in the preview's page and hand back its value.
@@ -252,6 +279,8 @@ private Q_SLOTS:
     void loadingModesGovernPreviewLifetime();
     void sessionRestoreCreatesPreviewEarly();
     void keptModesFreezeAndReleaseWhileClosed();
+    void directionalFocusUsesPaneGeometryBothWays();
+    void previewEditableBypassesGlobalPaneRouter();
 
 private:
     QTemporaryDir m_dir;
@@ -725,6 +754,204 @@ void FollowModeTest::keptModesFreezeAndReleaseWhileClosed()
     }
     hostEager.release();
     Settings::self()->setLoadingMode(Settings::LazyKeep); // restore the default
+}
+
+void FollowModeTest::directionalFocusUsesPaneGeometryBothWays()
+{
+    Settings::self()->setVimReadingNavigation(true);
+    Settings::self()->setLoadingMode(Settings::LazyKeep);
+    auto host = std::make_unique<FakeHost>();
+    host->resize(900, 500);
+    host->show();
+    host->activateWindow();
+    QTest::qWait(50);
+    KTextEditor::MainWindow wrapper(host.get());
+    connect(host.get(), &FakeHost::viewChanged, &wrapper, &KTextEditor::MainWindow::viewChanged);
+    {
+        DummyPlugin plugin(nullptr);
+        PluginView pluginView(&plugin, &wrapper);
+        auto *doc = KTextEditor::Editor::instance()->createDocument(nullptr);
+        QVERIFY(doc->openUrl(QUrl::fromLocalFile(m_alphaPath)));
+        auto *editor = doc->createView(nullptr);
+        editor->setParent(host.get());
+        editor->setGeometry(0, 0, 400, 500);
+        editor->show();
+        host->allViews << editor;
+        host->setActive(editor);
+        QVERIFY(QMetaObject::invokeMethod(&pluginView, "togglePreview"));
+        auto *preview = previewIn(host->toolView);
+        QVERIFY(preview);
+        host->toolView->setGeometry(450, 0, 450, 500);
+        host->toolView->show();
+        preview->show();
+        QVERIFY(waitForText(preview, QLatin1String("alpha body")));
+
+        Settings::self()->setVimReadingNavigation(false);
+        editor->setFocus();
+        QKeyEvent disabled(QEvent::KeyPress, Qt::Key_L, Qt::ControlModifier);
+        QCoreApplication::sendEvent(editor, &disabled);
+        QTRY_VERIFY(editor->hasFocus());
+        Settings::self()->setVimReadingNavigation(true);
+
+        editor->setFocus();
+        QKeyEvent editorToPreview(QEvent::KeyPress, Qt::Key_L, Qt::ControlModifier);
+        QCoreApplication::sendEvent(editor, &editorToPreview);
+        auto *web = preview->findChild<QWebEngineView *>();
+        QVERIFY(web);
+        QWidget *proxy = nullptr;
+        QTRY_VERIFY((proxy = web->focusProxy()) != nullptr);
+        // The pane geometry widget must not merely report focus: the live
+        // WebEngine view (normally its render-widget proxy) must own it.
+        QTRY_VERIFY(QApplication::focusWidget() == proxy || QApplication::focusWidget() == web);
+        QVERIFY(QApplication::focusWidget() != preview);
+
+        // A real key after the handoff proves that focus reached the page
+        // rather than stopping at the outer PreviewWidget container.
+        QCOMPARE(evalJs(preview,
+                        QStringLiteral(
+                            "window.scrollTo(0, 0);"
+                            "for (var i=0;i<120;i++) {"
+                            "var p=document.createElement('p'); p.textContent='focus handoff filler '+i;"
+                            "document.getElementById('content').appendChild(p);"
+                            "}"
+                            "String(window.scrollY)")),
+                 QStringLiteral("0"));
+        QTest::keyClick(proxy, Qt::Key_J);
+        QTRY_VERIFY(evalJs(preview, QStringLiteral("String(window.scrollY)")).toDouble() > 0);
+        const double afterJ = evalJs(preview, QStringLiteral("window.scrollY")).toDouble();
+        QTest::keyClick(proxy, Qt::Key_K);
+        QTRY_VERIFY(evalJs(preview, QStringLiteral("String(window.scrollY)")).toDouble() < afterJ);
+
+        QCOMPARE(evalJs(preview,
+                        QStringLiteral(
+                            "window.__setReadingNavigation(true);"
+                            "document.dispatchEvent(new KeyboardEvent('keydown',{key:'h',ctrlKey:true,bubbles:true}));"
+                            "'sent'")),
+                 QStringLiteral("sent"));
+        QTRY_VERIFY(editor->hasFocus());
+
+        // A real window shortcut must not win while pane navigation is on.
+        bool conflictTriggered = false;
+        QAction conflict(host.get());
+        conflict.setShortcut(QKeySequence(Qt::CTRL | Qt::Key_L));
+        conflict.setShortcutContext(Qt::WindowShortcut);
+        connect(&conflict, &QAction::triggered, [&conflictTriggered]() {
+            conflictTriggered = true;
+        });
+        host->addAction(&conflict);
+        editor->setFocus();
+        QTest::keyClick(editor, Qt::Key_L, Qt::ControlModifier);
+        QTRY_VERIFY(!conflictTriggered);
+        QVERIFY(preview->hasFocus() || preview->findChild<QWebEngineView *>()->hasFocus());
+        Settings::self()->setVimReadingNavigation(false);
+        editor->setFocus();
+        QTest::keyClick(editor, Qt::Key_L, Qt::ControlModifier);
+        QTRY_VERIFY(conflictTriggered);
+        Settings::self()->setVimReadingNavigation(true);
+
+        // Auxiliary editable fields are not the editor text surface and keep
+        // their own Ctrl shortcuts.
+        conflictTriggered = false;
+        auto *auxiliary = new QLineEdit(editor);
+        auxiliary->setGeometry(5, 5, 120, 24);
+        auxiliary->show();
+        QKeyEvent auxiliaryKey(QEvent::KeyPress, Qt::Key_L, Qt::ControlModifier);
+        QCoreApplication::sendEvent(auxiliary, &auxiliaryKey);
+        QVERIFY(!conflictTriggered);
+        auxiliary->deleteLater();
+
+        // Public MainWindow::views() exposes editor splits; the nearest
+        // positive-distance candidate wins over the farther preview.
+        auto *splitDoc = KTextEditor::Editor::instance()->createDocument(nullptr);
+        auto *split = splitDoc->createView(nullptr);
+        split->setParent(host.get());
+        split->setGeometry(400, 0, 40, 500);
+        split->show();
+        host->allViews << split;
+        editor->setFocus();
+        QTest::keyClick(editor, Qt::Key_L, Qt::ControlModifier);
+        QTRY_VERIFY(split->hasFocus());
+
+        delete doc;
+        delete splitDoc;
+    }
+    host.release();
+    Settings::self()->setVimReadingNavigation(false);
+}
+
+void FollowModeTest::previewEditableBypassesGlobalPaneRouter()
+{
+    Settings::self()->setVimReadingNavigation(true);
+    Settings::self()->setLoadingMode(Settings::LazyKeep);
+    auto host = std::make_unique<FakeHost>();
+    host->resize(900, 500);
+    host->show();
+    host->activateWindow();
+    QTest::qWait(50);
+    KTextEditor::MainWindow wrapper(host.get());
+    connect(host.get(), &FakeHost::viewChanged, &wrapper, &KTextEditor::MainWindow::viewChanged);
+
+    // PluginView is installed after the probe, so its application filter runs
+    // first. If it consumes either event for the preview, the probe never sees
+    // it.
+    ApplicationEventProbe probe;
+    qApp->installEventFilter(&probe);
+    {
+        DummyPlugin plugin(nullptr);
+        PluginView pluginView(&plugin, &wrapper);
+        auto *doc = KTextEditor::Editor::instance()->createDocument(nullptr);
+        QVERIFY(doc->openUrl(QUrl::fromLocalFile(m_alphaPath)));
+        auto *editor = doc->createView(nullptr);
+        editor->setParent(host.get());
+        editor->setGeometry(0, 0, 400, 500);
+        editor->show();
+        host->allViews << editor;
+        host->setActive(editor);
+
+        QVERIFY(QMetaObject::invokeMethod(&pluginView, "togglePreview"));
+        auto *preview = previewIn(host->toolView);
+        QVERIFY(preview);
+        host->toolView->setGeometry(450, 0, 450, 500);
+        host->toolView->show();
+        preview->show();
+        QVERIFY(waitForText(preview, QLatin1String("alpha body")));
+
+        auto *web = preview->findChild<QWebEngineView *>();
+        QVERIFY(web);
+        QWidget *proxy = web->focusProxy();
+        QVERIFY(proxy);
+        QCOMPARE(evalJs(preview,
+                        QStringLiteral(
+                            "(function(){var input=document.createElement('input');"
+                            "input.id='kdx-preview-editable'; input.value='keep';"
+                            "document.getElementById('content').appendChild(input);"
+                            "input.focus(); return document.activeElement.id;})()")),
+                 QStringLiteral("kdx-preview-editable"));
+        proxy->setFocus();
+        QTest::qWait(100); // let WebEngine retain DOM focus through the proxy
+        QCOMPARE(evalJs(preview, QStringLiteral("document.activeElement.id")),
+                 QStringLiteral("kdx-preview-editable"));
+
+        probe.target = proxy;
+        QKeyEvent override(QEvent::ShortcutOverride, Qt::Key_L, Qt::ControlModifier);
+        QCoreApplication::sendEvent(proxy, &override);
+        QKeyEvent press(QEvent::KeyPress, Qt::Key_L, Qt::ControlModifier);
+        QCoreApplication::sendEvent(proxy, &press);
+
+        // Both events passed through the application filter. PreviewWidget may
+        // claim ShortcutOverride for the page, but the global editor router did
+        // not consume it or move focus to the editor destination.
+        QVERIFY(probe.shortcutOverrideCount > 0);
+        QVERIFY(probe.keyPressCount > 0);
+        QTRY_COMPARE(evalJs(preview, QStringLiteral("document.activeElement.id")),
+                     QStringLiteral("kdx-preview-editable"));
+        QVERIFY(!editor->hasFocus());
+
+        delete doc;
+    }
+    qApp->removeEventFilter(&probe);
+    host.release();
+    Settings::self()->setVimReadingNavigation(false);
 }
 
 QTEST_MAIN(FollowModeTest)

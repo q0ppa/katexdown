@@ -101,6 +101,9 @@ public:
     // is part of the DOM (preview.js), so it travels into the exported
     // standalone .html exactly as it is set here.
     bool codeCopyButton() const { return m_codeCopyButton; }
+    // Whether the preview accepts Vim-style reading keys (j/k, n/p, h/l).
+    // Pane focus movement with Ctrl+h/j/k/l is part of the same opt-in.
+    bool vimReadingNavigation() const { return m_vimReadingNavigation; }
     LoadingMode loadingMode() const
     {
         return m_loadingMode;
@@ -138,6 +141,7 @@ public:
     void setLoadRemoteMedia(bool enabled);
     void setUseGithubCss(bool enabled);
     void setCodeCopyButton(bool enabled);
+    void setVimReadingNavigation(bool enabled);
     void setLoadingMode(LoadingMode mode);
     void setImageMode(ImageMode mode);
     void setImageReclaim(ImageReclaim mode);
@@ -162,6 +166,10 @@ private:
     bool m_useGithubCss = true;
     // Copy button on code blocks; on by default.
     bool m_codeCopyButton = true;
+    // Opt-in because j/k/n/p/h/l are ordinary text-entry keys and can overlap
+    // editor/window shortcuts. Native browser arrows remain available either
+    // way.
+    bool m_vimReadingNavigation = false;
     LoadingMode m_loadingMode = LazyKeep;
     // Image decode policy; Auto by default (see enum above).
     ImageMode m_imageMode = Adaptive;
