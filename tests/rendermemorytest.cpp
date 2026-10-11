@@ -19,6 +19,7 @@
 // RSS is read from /proc (Linux, which is what CI runs); on other platforms
 // the RSS-based tests skip and only the image test runs.
 
+#include "katexdownpaths.h"
 #include "previewwidget.h"
 #include "settings.h"
 
@@ -292,6 +293,27 @@ QString bigText(const QString &tag)
     }
     return s;
 }
+
+// A formula-heavy markdown document. The source is deliberately tiny (3000
+// inline formulas are ~36 kB of markdown, under the shortened test budget's
+// text charge) while KaTeX turns each one into ~20-40 DOM elements, so it is
+// exactly the document the text-length estimate is blind to.
+QString mathText(const QString &tag)
+{
+    QString s;
+    s += QStringLiteral("# %1\n\n").arg(tag);
+    for (int i = 0; i < 3000; ++i) {
+        s += QStringLiteral("$x_{%1}$\n\n").arg(i);
+    }
+    return s;
+}
+
+bool katexAssetsAvailable()
+{
+    const QString dir = katexdownpaths::dataDir();
+    return QFile::exists(dir + QStringLiteral("/katex.min.js"))
+        && QFile::exists(dir + QStringLiteral("/texmath.min.js"));
+}
 } // namespace
 
 class RenderMemoryTest : public QObject
@@ -302,7 +324,9 @@ private Q_SLOTS:
     void maintenanceRecycleFreesMemoryAndKeepsThePage();
     void imagesSurviveMaintenanceRecycle();
     void idleTextChurnReclaimsInPlaceWithoutReload();
+    void formulaHeavyChurnReclaimsInPlace();
     void imageDecodeResidueRecyclesOnlyWhenMinimized();
+    void imageResidueRecyclesWhileVisibleWhenConfigured();
     void idleImageHeavyDocumentDoesNotRecycleInALoop();
     void maintenanceRecycleKeepsTheReaderPlaceWithImages();
     void editorRendersAfterAScrollDoNotRechargeThePageOwnDecodes();
@@ -584,6 +608,108 @@ void RenderMemoryTest::idleTextChurnReclaimsInPlaceWithoutReload()
     delete doc;
 }
 
+// The renderer-memory estimate used to charge only the markdown's text
+// length. A formula-heavy document breaks that assumption: 3000 inline
+// formulas are ~36 kB of source (a ~19 MB charge, under the 32 MB test budget)
+// but tens of thousands of DOM elements, and the renderer keeps every one of
+// them until a reclaim. Without a DOM charge the estimate never crosses the
+// budget for such a document, the in-place GC never fires, and the renderer
+// sits at its plateau — only the 3-minute time backstop would ever reclaim it
+// (the plateau the reported long-session/formula-heavy growth came from).
+// This pins the page-reported DOM charge (preview.js / noteRenderedDom): ONE
+// edit must cross the budget and the idle forced GC must return the strand in
+// place, without a renderer reload.
+void RenderMemoryTest::formulaHeavyChurnReclaimsInPlace()
+{
+    if (!procAvailable()) {
+        QSKIP("renderer RSS is read from /proc (Linux only)");
+    }
+    if (!katexAssetsAvailable()) {
+        QSKIP("KaTeX assets not found in the data dir; run tools/fetch-assets.py");
+    }
+    qputenv("KATEXDOWN_MEM_BUDGET_MB", "32"); // above one text charge, below one DOM charge
+    qputenv("KATEXDOWN_MEM_IDLE_MS", "800");
+    qunsetenv("KATEXDOWN_MEM_OFF");
+    qunsetenv("KATEXDOWN_MEM_IMG_CHARGE_MB");
+    qunsetenv("KATEXDOWN_MEM_MINIMIZED");
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString path = dir.filePath(QStringLiteral("formulas.md"));
+    QFile f(path);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    QVERIFY(f.write(mathText(QStringLiteral("f0")).toUtf8()) > 0);
+    f.close();
+    KTextEditor::Document *doc = KTextEditor::Editor::instance()->createDocument(nullptr);
+    QVERIFY(doc->openUrl(QUrl::fromLocalFile(path)));
+    QTRY_VERIFY(doc->text().size() > 1000);
+
+    auto preview = std::make_unique<PreviewWidget>(nullptr, nullptr, doc);
+    preview->resize(700, 500);
+    preview->show();
+    QVERIFY(waitForText(preview.get(), QLatin1String("f0")));
+    QVERIFY(dropPreviewFocus(preview.get()));
+
+    // The reclamation primitive must be present, or nothing below can work.
+    QCOMPARE(evalJs(preview.get(), QStringLiteral("String(typeof window.gc)")), QStringLiteral("function"));
+    // The page really built the DOM the charge is about (the page-side seam).
+    const qint64 elements = evalJs(preview.get(), QStringLiteral("window.__kdxRenderStats ? window.__kdxRenderStats() : '0'")).toLongLong();
+    QVERIFY2(elements > 10000, qPrintable(QStringLiteral("formula document built only %1 elements").arg(elements)));
+
+    const QSet<long> baselinePids = rendererPids();
+    const long baselineKb = totalEngineKb();
+
+    // Phase 1: the first render is never charged (Invariant 12), so an idle
+    // formula document reclaims nothing and must not reload.
+    QTest::qWait(8000);
+    QVERIFY2(rendererPids() == baselinePids, "an idle formula preview reloaded itself");
+
+    // Phase 2: ONE edit replaces the whole formula DOM. The DOM charge alone
+    // crosses the 32 MB budget (the text charge stays under it), so the idle
+    // forced GC must run and return the strand, in place. Observing the GC
+    // primitive itself (wrapping window.gc) makes the test independent of RSS
+    // noise: one generation's strand is only a few MB and cannot reliably
+    // distinguish a reclaim from drift.
+    QCOMPARE(evalJs(preview.get(),
+                    QStringLiteral("(function () { var orig = window.gc; window.__kdxGcCalls = 0; "
+                                   "window.gc = function () { window.__kdxGcCalls++; return orig.apply(this, arguments); }; "
+                                   "return 'ok'; })()")),
+             QStringLiteral("ok"));
+    doc->setText(mathText(QStringLiteral("f1")));
+    QVERIFY(waitForText(preview.get(), QLatin1String("f1")));
+    const long peakKb = totalEngineKb();
+    bool reclaimed = false;
+    {
+        QDeadlineTimer deadline(25000);
+        while (!deadline.hasExpired()) {
+            QVERIFY2(rendererPids() == baselinePids,
+                     "formula churn reloaded the renderer instead of reclaiming in place");
+            if (evalJs(preview.get(), QStringLiteral("String(window.__kdxGcCalls || 0)")).toInt() >= 1) {
+                reclaimed = true;
+                break;
+            }
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
+        }
+    }
+    QVERIFY2(reclaimed,
+             qPrintable(QStringLiteral("the DOM charge did not trigger an in-place reclaim "
+                                       "(peak %1 kB, now %2 kB)")
+                            .arg(peakKb).arg(totalEngineKb())));
+    // And the reclaim really ran in place and left the renderer near its floor.
+    QVERIFY2(totalEngineKb() < baselineKb + 40 * 1024,
+             qPrintable(QStringLiteral("formula churn left the renderer at %1 kB (baseline %2 kB)")
+                            .arg(totalEngineKb()).arg(baselineKb)));
+    qInfo("formula churn: baseline %ld kB, peak %ld kB, after in-place reclaim %ld kB",
+          baselineKb, peakKb, totalEngineKb());
+
+    // Phase 3: it settles — no loop of GCs or reloads follows.
+    const QSet<long> afterReclaim = rendererPids();
+    QTest::qWait(8000);
+    QVERIFY2(rendererPids() == afterReclaim, "the formula preview kept reloading after the reclaim");
+
+    delete doc;
+}
+
 // Decoded-image memory is the one part a forced GC cannot return (measured:
 // parking, window.gc and clearHttpCache barely move it), so it alone may still
 // trigger the discard+reload — and only while the preview's window is
@@ -599,6 +725,8 @@ void RenderMemoryTest::imageDecodeResidueRecyclesOnlyWhenMinimized()
     if (!procAvailable()) {
         QSKIP("renderer RSS is read from /proc (Linux only)");
     }
+    // This test pins the conservative default; another test switches the policy.
+    Settings::self()->setImageReclaim(Settings::MinimizedOnly);
     qputenv("KATEXDOWN_MEM_BUDGET_MB", "16"); // 4 x 4 MB flat charge crosses it
     qputenv("KATEXDOWN_MEM_IDLE_MS", "800");
     qputenv("KATEXDOWN_MEM_IMG_CHARGE_MB", "4");
@@ -685,6 +813,100 @@ void RenderMemoryTest::imageDecodeResidueRecyclesOnlyWhenMinimized()
     const QString failed = evalJs(preview.get(), QStringLiteral("document.images[0].dataset.kdxFailed || 'ok'"));
     QCOMPARE(failed, QStringLiteral("ok"));
 
+    delete doc;
+}
+
+// Settings::ImageReclaim == IdleVisible trades the smallest possible
+// footprint on the user's attention for bounded decoded-image memory: the same
+// residue scenario as above, but the window is NOT minimized — a visible,
+// unfocused preview that has been quiet recreates its page when the residue
+// crosses the budget, and comes back with its content and scroll position.
+// The default (MinimizedOnly) keeps the visible page put; this is the opt-in.
+void RenderMemoryTest::imageResidueRecyclesWhileVisibleWhenConfigured()
+{
+    if (!procAvailable()) {
+        QSKIP("renderer RSS is read from /proc (Linux only)");
+    }
+    Settings::self()->setImageReclaim(Settings::IdleVisible);
+    qputenv("KATEXDOWN_MEM_BUDGET_MB", "16"); // 4 x 4 MB flat charge crosses it
+    qputenv("KATEXDOWN_MEM_IDLE_MS", "800");
+    qputenv("KATEXDOWN_MEM_IMG_CHARGE_MB", "4");
+    qunsetenv("KATEXDOWN_MEM_OFF");
+    qunsetenv("KATEXDOWN_MEM_MINIMIZED");
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QString md = QStringLiteral("# imgs\n\n");
+    for (int i = 0; i < 400; ++i) {
+        md += QStringLiteral("- filler line %1 of a long body of text\n").arg(i);
+    }
+    md += QStringLiteral("\n");
+    for (int i = 0; i < 8; ++i) {
+        QFile png(dir.filePath(QStringLiteral("r%1.png").arg(i)));
+        QVERIFY(png.open(QIODevice::WriteOnly));
+        QCOMPARE(png.write(RedPng), RedPng.size());
+        png.close();
+        md += QStringLiteral("![img %1](r%1.png)\n\n").arg(i);
+    }
+    md += QStringLiteral("some body.\n");
+    const QString path = dir.filePath(QStringLiteral("doc.md"));
+    QFile f(path);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    QVERIFY(f.write(md.toUtf8()) > 0);
+    f.close();
+    KTextEditor::Document *doc = KTextEditor::Editor::instance()->createDocument(nullptr);
+    QVERIFY(doc->openUrl(QUrl::fromLocalFile(path)));
+    QTRY_VERIFY(doc->text().size() > 0);
+
+    auto preview = std::make_unique<PreviewWidget>(nullptr, nullptr, doc);
+    preview->resize(700, 500);
+    preview->show();
+    QVERIFY(waitForText(preview.get(), QLatin1String("imgs")));
+    QVERIFY(dropPreviewFocus(preview.get()));
+
+    // Reader-caused decodes push the residue over the budget, exactly like the
+    // minimized test above.
+    evalJs(preview.get(), QStringLiteral("(function(){window.dispatchEvent(new WheelEvent('wheel'));"
+                                        "window.scrollTo(0, document.body.scrollHeight);return 'ok';})()"));
+    {
+        QDeadlineTimer deadline(15000);
+        bool counted = false;
+        while (!deadline.hasExpired()) {
+            if (decodeStats(preview.get()).first >= 5) {
+                counted = true;
+                break;
+            }
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
+        }
+        QVERIFY2(counted, "the page never charged the reader-caused image decodes");
+    }
+
+    // The window is deliberately NOT minimized: with IdleVisible the idle,
+    // unfocused, visible preview must still recreate its page to release the
+    // image residue.
+    QVERIFY(!qEnvironmentVariableIsSet("KATEXDOWN_MEM_MINIMIZED"));
+    const QSet<long> baselinePids = rendererPids();
+    bool recycled = false;
+    {
+        QDeadlineTimer deadline(20000);
+        while (!deadline.hasExpired()) {
+            if (rendererPids() != baselinePids) {
+                recycled = true;
+                break;
+            }
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
+        }
+    }
+    QVERIFY2(recycled, "IdleVisible did not release the image residue while the preview was visible");
+
+    // The fresh page came back with the document and its images intact.
+    QVERIFY(waitForText(preview.get(), QLatin1String("imgs")));
+    QVERIFY(waitForDecodedImages(preview.get(), 1));
+    QCOMPARE(evalJs(preview.get(), QStringLiteral("document.images[0].dataset.kdxFailed || 'ok'")),
+             QStringLiteral("ok"));
+
+    // Back to the conservative default for the tests that follow.
+    Settings::self()->setImageReclaim(Settings::MinimizedOnly);
     delete doc;
 }
 

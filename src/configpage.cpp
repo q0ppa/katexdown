@@ -103,6 +103,23 @@ ConfigPage::ConfigPage(QWidget *parent)
     imageHint->setEnabled(false);
     form->addRow(QString(), imageHint);
 
+    // The web engine never returns decoded-image memory on its own, and the
+    // page cannot make it (parking, gc and the HTTP cache all fail) — only
+    // recreating the renderer does. That always happens once the window is
+    // minimized; this decides whether a visible preview may also be recreated
+    // at an idle moment (see design/lazyrender.md, "Renderer-memory
+    // maintenance").
+    m_imageReclaim = new QComboBox(this);
+    m_imageReclaim->addItem(i18n("Only when minimized \u2014 never refresh a preview you can see (default)"), Settings::MinimizedOnly);
+    m_imageReclaim->addItem(i18n("Also when the preview is idle \u2014 release image memory sooner (brief refresh)"), Settings::IdleVisible);
+    form->addRow(i18n("Release image memory:"), m_imageReclaim);
+    auto *reclaimHint = new QLabel(
+        i18n("Decoded images are the one kind of memory a preview cannot hand back while it stays alive \u2014 only recreating the page releases them, and a preview you can see is never refreshed by default. This setting trades that: with \u201cAlso when the preview is idle\u201d, a visible, unfocused preview that has been quiet is recreated when enough images have decoded, so a long browsing session stays bounded. Content and scroll position are preserved; the preview may briefly show a still frame while it reloads."),
+        this);
+    reclaimHint->setWordWrap(true);
+    reclaimHint->setEnabled(false);
+    form->addRow(QString(), reclaimHint);
+
     // Renderer JS heap cap: the preview's renderer never collects the garbage
     // full re-renders leave behind on its own, so a cap makes V8 collect under
     // pressure and keeps the growth between the idle forced GCs small (see
@@ -260,6 +277,9 @@ ConfigPage::ConfigPage(QWidget *parent)
     connect(m_imageMode, &QComboBox::currentIndexChanged, this, [this]() {
         Q_EMIT changed();
     });
+    connect(m_imageReclaim, &QComboBox::currentIndexChanged, this, [this]() {
+        Q_EMIT changed();
+    });
     connect(m_v8Cap, &QSpinBox::valueChanged, this, [this]() {
         Q_EMIT changed();
     });
@@ -386,6 +406,7 @@ void ConfigPage::apply()
     s->setCodeCopyButton(m_codeCopy->isChecked());
     s->setLoadingMode(static_cast<Settings::LoadingMode>(m_loading->currentData().toInt()));
     s->setImageMode(static_cast<Settings::ImageMode>(m_imageMode->currentData().toInt()));
+    s->setImageReclaim(static_cast<Settings::ImageReclaim>(m_imageReclaim->currentData().toInt()));
     s->setV8HeapCapMb(m_v8Cap->value());
     QList<int> levels;
     for (int level = 1; level <= 6; ++level) {
@@ -411,6 +432,7 @@ void ConfigPage::reset()
     m_codeCopy->setChecked(s->codeCopyButton());
     m_loading->setCurrentIndex(m_loading->findData(s->loadingMode()));
     m_imageMode->setCurrentIndex(m_imageMode->findData(s->imageMode()));
+    m_imageReclaim->setCurrentIndex(m_imageReclaim->findData(s->imageReclaim()));
     m_v8Cap->setValue(s->v8HeapCapMb());
     m_cssList->clear();
     const QStringList css = s->customCssFiles();
@@ -433,6 +455,7 @@ void ConfigPage::defaults()
     m_codeCopy->setChecked(true);
     m_loading->setCurrentIndex(m_loading->findData(Settings::LazyKeep));
     m_imageMode->setCurrentIndex(m_imageMode->findData(Settings::Adaptive));
+    m_imageReclaim->setCurrentIndex(m_imageReclaim->findData(Settings::MinimizedOnly));
     m_v8Cap->setValue(Settings::DefaultV8HeapCapMb);
     m_cssList->clear();
     for (int level = 1; level <= 6; ++level) {

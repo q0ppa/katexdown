@@ -114,6 +114,19 @@ unaffected, and engine gating is unchanged (a document still loads highlight.js
 when any fence exists, because a doc can outgrow an oversized fence into a
 normal one on the next edit).
 
+**Formula DOM: KaTeX renders HTML-only.** KaTeX normally emits every formula
+twice — the visible HTML tree plus a visually hidden MathML copy (for assistive
+tech, and for the LaTeX annotation the selection walker used to read). The
+hidden copy is a large share of the nodes per formula (more than half for
+simple inline math) and is retained for the document's whole life, so
+`preview.js` passes a small wrapper engine to markdown-it-texmath that renders
+`output: "html"` and stamps the LaTeX source onto the root `.katex` element
+(`role="math"`, `aria-label`, `data-kdx-tex`). The visible result is identical,
+`__kdxSelectionText()` returns the exact LaTeX (Invariant 17), and exports
+strip the attribute like every other machinery marker. Same idea as the
+fence-size cap: constrain how much DOM an engine may build, not only whether it
+runs.
+
 ### 3. Image decode policy (Settings::ImageMode, `data/js/preview.js`, `data/css/base.css`)
 
 Mirrored in the page through `__setImageMode('eager' | 'auto' | 'saver')`
@@ -199,21 +212,40 @@ the user can see**:
   At an idle moment over budget, `reclaimInPlace()` calls it; the estimate
   drops to the image charge (what a GC cannot return). No navigation, no scroll
   change, no flicker.
-- **Discard+reload (the image residue only, and only when invisible).**
+- **Discard+reload (the image residue only, and only by policy).**
   `performMemoryRecycle()` hides the page, discards it (the renderer process
   exits and returns every byte) and loads a fresh page from the mirrored
   document state, restoring the reader's scroll position and image geometry
-  (Section 6). `reclaimAtIdle()` uses it only when the decoded-image charge
-  alone is over budget **and** the preview's top-level window is minimized
-  (`previewWindowMinimized()`), i.e. the user cannot see the page.
+  (Section 6). A decoded image is the one thing no page-side primitive can
+  release (parking, `window.gc` and `clearHttpCache` all fail — only renderer
+  death does), so `reclaimAtIdle()` uses this when the decoded-image charge
+  alone is over budget. It always runs while the preview's top-level window is
+  minimized (`previewWindowMinimized()`); with `Settings::ImageReclaim ==
+  IdleVisible` it also runs on a *visible* preview, because the caller's gates
+  already require it to be unfocused and quiet for the idle window. The default
+  (`MinimizedOnly`) never reloads a visible page.
 - **At a document switch**, the same discard+reload is free: the switch already
   reloads the page, so replacing that reload with a recycle costs the user
   nothing extra. This is what bounds tab-switching sessions.
 
+**Measured image accretion (a visible preview, policy ticker disabled):**
+scrolling once through 16 distinct 900×1800 images grew renderer RSS by
+~111 MB (~7 MB per distinct decode) with no plateau; scrolling back over the
+same 16 images added ~59 MB more (~6 MB per re-decode, because parking swaps
+them out and back in); 20 s of idle returned nothing. The renderer never hands
+a decoded frame back on its own. That is why the image residue needs a
+renderer restart, and why releasing it is a policy choice rather than an
+always-on behavior: `MinimizedOnly` (default) leaves a visible preview
+untouched, `IdleVisible` bounds a long browsing session at the cost of a rare,
+idle, scroll-preserving refresh.
+
 The trigger is an **estimate**, not an RSS measurement (portable): every full
 page load adds a fixed cost (re-executing the inlined engines), every
 full-document markdown push that *replaces already-rendered content* adds
-`text size × factor`, and every image decode the reader caused adds a charge
+`text size × factor` plus a per-element charge for the DOM the push built (the
+page returns `#content`'s element count from `__setMarkdown`; `noteRenderedDom`
+charges 2 kB/element — the conservative upper end of Blink's node + computed
+style + layout cost), and every image decode the reader caused adds a charge
 (see below), with the factors calibrated from the measurements above (defaults
 in `readMemTuning()`; tunable per process via `KATEXDOWN_MEM_BUDGET_MB`,
 `KATEXDOWN_MEM_IDLE_MS`, `KATEXDOWN_MEM_MAX_AGE_MS`, `KATEXDOWN_MEM_OFF=1`, and
@@ -228,11 +260,13 @@ complete, so the preview can never stay hidden.
 **A page's first render is not charged.** The dead memory the estimate counts
 is what a render leaves behind when it *replaces* content that was already on
 the page. The very first render of a page — first open, or the fresh page of a
-recycle — replaces nothing, so charging it text × factor would keep any
-document whose text charge exceeds the budget permanently "due"; the open
+recycle — replaces nothing, so charging it the render charge would keep any
+document whose charge exceeds the budget permanently "due"; the open
 preview would then reclaim on every idle window (measured: a fresh renderer
 process every ~7 s for an idle 1 MB text document before this gate existed).
-`m_renderedOnce` (reset when a discard kills the renderer) is the gate.
+`m_renderedOnce` (reset when a discard kills the renderer) is the gate. The
+element count the page returns is charged under the same gate: only a render
+that replaced content adds it.
 
 **Image decodes are charged too — but only the ones the reader caused.**
 Scrolling past an image decodes it (at viewport quality) and the renderer keeps
@@ -416,14 +450,17 @@ re-decoding them.
 6. **The closed panel costs no CPU.** Kept modes freeze on close; only a
    frozen, long-closed page may be discarded. Opening returns the page to
    Active and lets the load pipeline refresh it.
-7. **Reclaim in place first; discard only for what a GC cannot return — and
-   never a visible page.** A forced GC (`window.gc`, exposed by the merged
+7. **Reclaim in place first; discard only for what a GC cannot return, and
+   then only by policy.** A forced GC (`window.gc`, exposed by the merged
    `--expose-gc`) returns the dead DOM/V8 memory a re-render stranded without
    touching the page: that is the primary reclaim. Decoded-image memory is the
    one part it cannot return, so the maintenance may fall back to the
-   discard+reload (`performMemoryRecycle`) only for the image charge and only
-   while the preview's window is minimized (`previewWindowMinimized()`), i.e.
-   invisible; a page the user can see is never reloaded, and when `window.gc`
+   discard+reload (`performMemoryRecycle`) only for the image charge: always
+   while the preview's window is minimized (`previewWindowMinimized()`, i.e.
+   invisible), and — with `Settings::ImageReclaim == IdleVisible` — also on a
+   visible preview, which the caller's gates already require to be unfocused
+   and quiet for the idle window (the default `MinimizedOnly` never reloads a
+   visible page). When `window.gc`
    is unavailable (the user's own `--js-flags` won the merge) the maintenance
    does nothing rather than reload. Discard is the only wholesale renderer
    release QtWebEngine allows: it hides the page (`setVisible(false)`), which
@@ -444,11 +481,13 @@ re-decoding them.
    the preview has been quiet (no text change, input or pending work) for the
    idle window, is visible, and is not focused; a charged image decode counts
    as activity, so a scrolling reader is neither GC'd nor reloaded mid-scroll.
-   The image-residue discard additionally requires the preview's window to be
-   minimized; it restores the scroll position *and the image geometry* that
-   position was measured against (Section 6), so the reload lands on the same
-   content when the reader returns. A safety timer aborts any recycle that
-   gets stuck, so the preview can never remain hidden.
+   The image-residue discard restores the scroll position *and the image
+   geometry* that position was measured against (Section 6), so the reload
+   lands on the same content when the reader returns. A visible preview is
+   only ever recreated under `Settings::ImageReclaim == IdleVisible`, and then
+   only while unfocused and quiet for the idle window (the same gates as the
+   GC); by default it waits for the minimized window. A safety timer aborts
+   any recycle that gets stuck, so the preview can never remain hidden.
 10. **A page only ever re-renders a same-folder switch in place** (Section 5)
     when it is loaded, the panel is open, nothing is pending, and the new text
     needs no engine the page lacks; any other switch is a full load.
@@ -503,6 +542,16 @@ re-decoding them.
     overwrites width/height the author wrote, and is provisional — the image's
     first real decode on the fresh page corrects it. Exports never see it
     (`data-kdx-sized="1"` boxes are stripped, like every other recorded one).
+17. **A formula contributes its visible DOM and its LaTeX source once, and
+    never a second (hidden) rendering.** KaTeX is driven through the
+    HTML-only wrapper engine: no `.katex-mathml` tree is built, the LaTeX
+    source rides on the `.katex` element (`role="math"`/`aria-label`/
+    `data-kdx-tex`), and `__kdxSelectionText()` reads that attribute (falling
+    back to a MathML annotation for a page that carries one) so copy is still
+    the exact LaTeX, exactly once. `__serializedHtml()` strips `data-kdx-tex`
+    like every other machinery marker. Turning the MathML copy back on, or
+    dropping the source attribute, re-opens the formula-DOM memory cost or
+    loses formula copy.
 
 ## Pitfalls (each already cost a debugging session)
 
@@ -545,6 +594,18 @@ re-decoding them.
   `editorRendersAfterAScrollDoNotRechargeThePageOwnDecodes` pins it (the charged
   set must not grow across edits, and the renderer must stay put).
 
+- **The text-length estimate was blind to rendered DOM (the formula-heavy
+  plateau).** `text × 512` is a fair proxy for a prose document, but a
+  formula-heavy one is a few kB of markdown and tens of thousands of KaTeX
+  elements; the charge stayed far under budget, `recycleDue()` stayed false, the
+  in-place GC never fired, and only the 3-minute time backstop ever reclaimed
+  the renderer — so a long editing session on such a document sat at its plateau
+  in between. Fixed by charging the DOM the page actually built: `__setMarkdown`
+  returns `#content`'s element count and the host adds it in `noteRenderedDom`
+  under the existing first-render gate. One edit now crosses the budget for a
+  3000-formula document, and `formulaHeavyChurnReclaimsInPlace` pins it (the
+  forced GC runs with the charge and never runs without it).
+
 - **"Only process death returns renderer memory" was wrong, and it cost a
   reload.** The design originally treated the discard+reload as the only
   reclamation primitive, so the same-document recycle navigated (and flickered)
@@ -552,8 +613,10 @@ re-decoding them.
   stranded DOM/V8 memory **in place**, repeatably, in ~40-150 ms, down to the
   loaded footprint. The maintenance therefore reclaims with a forced GC
   (merged `--expose-gc`), and the discard survives only for decoded images —
-  which a GC does not return — and only while the window is minimized. Do not
-  simplify this back to a visible reload, and do not treat the heap cap as the
+  which a GC does not return — as a policy-gated fallback (minimized always;
+  `Settings::ImageReclaim == IdleVisible` also on an idle, unfocused, visible
+  preview; default `MinimizedOnly`). Do not make the visible reload
+  unconditional, and do not treat the heap cap as the
   reclaim: it bounds the peak between GCs and never returns the pages.
   `idleTextChurnReclaimsInPlaceWithoutReload` pins the in-place reclaim (no
   renderer process change, RSS actually comes down).
@@ -563,8 +626,21 @@ re-decoding them.
   budget, a policy that simply retries "over budget -> reclaim" would GC every
   idle window forever for no gain. `reclaimAtIdle()` therefore GCs only when
   there is render charge (`m_memEstimate > m_imgCharge`); the image residue
-  waits for the minimized-window discard. `imageDecodeResidueRecyclesOnlyWhenMinimized`
-  pins the visible half (no reload) and the minimized half (the discard).
+  waits for the discard, gated by `Settings::ImageReclaim` (minimized always;
+  `IdleVisible` also on an idle, unfocused, visible preview).
+  `imageDecodeResidueRecyclesOnlyWhenMinimized` pins the default (the visible
+  half must not reload; the minimized half must), and
+  `imageResidueRecyclesWhileVisibleWhenConfigured` pins the opt-in.
+
+- **A due-but-declined reclaim must not stop the decode poll.** `idleTick`
+  used to poll `window.__kdxDecodeStats()` only while `!recycleDue()`. Once the
+  max-age backstop (or a charge) made `recycleDue()` permanently true but
+  `reclaimAtIdle()` declined to act — the image residue was still below the
+  budget, or the policy refused a visible reload — the host stopped observing
+  decodes, `m_imgCharge` froze, and the residue could never reach the threshold
+  it needed to act on. The poll is now independent of "due": a declined
+  reclaim keeps the accounting fresh (it is only skipped once the residue is
+  already over budget, where more charges cannot change the decision).
 
 - **The "1×1 dot" bug.** Images parked *before their first decode* (below the
   fold) had the parking placeholder's own dimensions recorded as their box:
@@ -728,7 +804,10 @@ re-decoding them.
   the policy refuses to recycle a *focused* preview, and the offscreen test
   harness focuses the shown widget — tests that exercise `idleTick` drop the
   focus again (`clearFocus` on the view and its focus proxy) to mirror Kate,
-  where the editor holds focus.
+  where the editor holds focus. The page reports its DOM weight through the
+  `window.__setMarkdown()` return value and the `window.__kdxRenderStats()`
+  seam (the element count of the last render), which is what the DOM charge
+  and `formulaHeavyChurnReclaimsInPlace` read.
 - Which test pins which invariant:
   - `followmodetest::keptModesFreezeAndReleaseWhileClosed` — lifecycle state
     machine (Active → Frozen → Discarded → reload → Active; Eager never
@@ -739,6 +818,17 @@ re-decoding them.
     texmath: numeric math (`$2^{192} - 2^{32}$`, `$2$`, `$10^3$`) loads the
     KaTeX engine both on first load and when typed into a plain document,
     while currency prose texmath keeps literal never does.
+  - `renderfeaturestest::mathRendersWhenAssetsPresent` — Invariant 17: a math
+    document builds no `.katex-mathml`, every `.katex` carries
+    `role="math"`/`aria-label`/`data-kdx-tex`, and the `.katex`/
+    `.katex-display` structure is unchanged.
+  - `renderfeaturestest::selectionCopyOfMathKeepsTheLatex` — the copy walker
+    still returns the exact LaTeX for inline and display math (Invariant 17).
+  - `rendermemorytest::formulaHeavyChurnReclaimsInPlace` — the rendered-DOM
+    charge: one edit of a 3000-formula document (text charge under the budget)
+    crosses it and the idle in-place `window.gc` runs (observed by wrapping the
+    primitive), with no renderer reload and RSS back near the baseline. The
+    same test fails with the DOM charge zeroed, which is the pre-change state.
   - `renderfeaturestest::oversizedFenceRendersPlain` — Invariant 11: the cap
     is read from `window.kdxHljsMaxChars` (the page is the single source of
     truth); an oversized fence keeps its exact text, its `<pre>` box and its
@@ -773,13 +863,20 @@ re-decoding them.
     the redesign this reloaded the renderer, which was the intrusive
     self-refresh.
   - `rendermemorytest::imageDecodeResidueRecyclesOnlyWhenMinimized` —
-    Invariants 7/13: decodes the *reader* caused (a wheel event + a scroll
+    Invariants 7/13 with the default `Settings::ImageReclaim == MinimizedOnly`:
+    decodes the *reader* caused (a wheel event + a scroll
     that pulls far-below-the-fold images in; flat charge via
     `KATEXDOWN_MEM_IMG_CHARGE_MB`) push the estimate over the budget; the
     **visible** page must not reload (the image residue is not GC-reclaimable),
     and the same page recycles as soon as `KATEXDOWN_MEM_MINIMIZED` reports the
     window minimized — with images decoding again on the fresh page and no
     stranded failure state.
+  - `rendermemorytest::imageResidueRecyclesWhileVisibleWhenConfigured` —
+    Invariants 7/9 with `Settings::ImageReclaim == IdleVisible`: the same
+    residue, the window deliberately *not* minimized, and the idle, unfocused,
+    visible preview recreates its page to release the images — then comes back
+    with the content and a decoded image (no stranded failure state). The
+    setting is restored to the default at the end.
   - `rendermemorytest::idleImageHeavyDocumentDoesNotRecycleInALoop` —
     Invariants 12/13 for images: an idle open document whose *own* decode set
     crosses the budget (2048×2048 photos, three of them charge the 8 MiB cap)

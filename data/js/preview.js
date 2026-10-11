@@ -150,11 +150,49 @@
   // Math (LaTeX): texmath.min.js defines a top-level `texmath` function when
   // inlined as a classic script. Both assets come from the data dir (see
   // tools/fetch-assets.py); without them `$` stays literal and nothing breaks.
+  // KaTeX can emit every formula twice: the visible HTML rendering plus a
+  // visually hidden MathML copy (for assistive tech, and for the LaTeX
+  // annotation the selection walker reads). That hidden copy is a large share
+  // of the DOM nodes per formula — for simple inline math more than half — and
+  // the nodes are retained for the life of the document, which is exactly the
+  // memory a formula-heavy document cannot use. Render HTML only and carry the
+  // LaTeX source on the element instead: the visible result is identical,
+  // `__kdxSelectionText()` still returns the exact LaTeX (from data-kdx-tex),
+  // and `role="math"` + `aria-label` keep the formula available to assistive
+  // tech. MathML's structured tree is the one thing lost; a LaTeX preview's
+  // audience keeps the exact source either way.
+  function escapeAttr(s) {
+    return s
+      .replace(/&/g, "&amp;")
+      .replace(/"/g, "&quot;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+  }
+
+  // markdown-it-texmath renders through `engine.renderToString(tex, opts)`;
+  // this wrapper drops the MathML copy and stamps the source onto the root
+  // `.katex` span (KaTeX's HTML output always opens with that exact tag, with
+  // the display wrapper around it).
+  var kdxKatexEngine = {
+    renderToString: function (tex, options) {
+      var opts = {};
+      for (var k in options) {
+        if (Object.prototype.hasOwnProperty.call(options, k)) {
+          opts[k] = options[k];
+        }
+      }
+      opts.output = "html";
+      var html = window.katex.renderToString(tex, opts);
+      var attrs = 'role="math" aria-label="' + escapeAttr(tex) + '" data-kdx-tex="' + escapeAttr(tex) + '"';
+      return html.replace('<span class="katex"', '<span class="katex" ' + attrs);
+    },
+  };
+
   if (window.texmath && window.katex) {
     try {
       window.markdownitTeXMath = window.markdownitTeXMath || window.texmath;
       md.use(window.markdownitTeXMath, {
-        engine: window.katex,
+        engine: kdxKatexEngine,
         delimiters: "dollars",
         katexOptions: { throwOnError: false },
       });
@@ -271,6 +309,13 @@
 
   var current = "";
 
+  // Element count of the last rendered #content, reported to the host (see
+  // __setMarkdown) as the page's honest DOM-weight measure. Markdown length
+  // badly under-reports a formula- or code-heavy document: 700 formulas are a
+  // few kB of source but ~100k DOM elements that the renderer keeps until a
+  // reclaim.
+  var kdxLastRenderElements = 0;
+
   // Leading YAML frontmatter (very first line "---" through a closing "---")
   // renders as a GitHub-style metadata table instead of an <hr> plus raw text.
   var FRONT_MATTER = /^---[ \t]*\r?\n([\s\S]*?\n)?---[ \t]*(?:\r?\n|$)/;
@@ -323,11 +368,23 @@
     rebuildOutline();
     armImages();
     decorateCodeBlocks();
+    kdxLastRenderElements = el.getElementsByTagName("*").length;
   }
 
+  // Returns the element count of the DOM just built. The host's
+  // runJavaScript callback reads it and charges it to the renderer-memory
+  // estimate (previewwidget.cpp / noteRenderedDom), so the in-place forced GC
+  // fires on the churn a formula-heavy document actually strands instead of
+  // waiting for the estimate's time backstop. One round-trip, no new timer.
   window.__setMarkdown = function (text) {
     current = text;
     rerender();
+    return String(kdxLastRenderElements);
+  };
+
+  // Test seam: the element count of the last render.
+  window.__kdxRenderStats = function () {
+    return String(kdxLastRenderElements);
   };
 
   window.__applyVars = function (vars) {
@@ -764,6 +821,10 @@
       img.removeAttribute("data-kdx-failed");
       img.removeAttribute("data-kdx-listen");
     }
+    var katexNodes = root.querySelectorAll(".katex");
+    for (var k = 0; k < katexNodes.length; k++) {
+      katexNodes[k].removeAttribute("data-kdx-tex");
+    }
     root.removeAttribute("data-pv-imgmode");
     return root.outerHTML;
   };
@@ -953,9 +1014,10 @@
     "img",
     "video",
     "audio",
-    // KaTeX renders both a MathML and an HTML copy of the formula; the
-    // annotation rule below reads the LaTeX source once, these two would
-    // otherwise contribute the formula twice.
+    // KaTeX's visible HTML copy would otherwise contribute the formula's
+    // glyphs; the walker below reads the LaTeX source once instead. KaTeX no
+    // longer builds a MathML copy (see kdxKatexEngine), but the class stays
+    // skipped so an old/exported page still cannot contribute it twice.
     ".katex-html",
     ".katex-mathml",
   ].join(", ");
@@ -1082,11 +1144,13 @@
 
     var el = node;
     if (el.classList && el.classList.contains("katex")) {
-      // The accessible MathML copy carries the LaTeX source in its
-      // annotation; that is the plain-text form of the formula. Inline math
-      // stays inline; the .katex-display wrapper gets its block break below.
+      // The LaTeX source is the plain-text form of the formula. KaTeX renders
+      // HTML-only now, so it lives in data-kdx-tex; the MathML annotation is
+      // still read for a page that carries one. Inline math stays inline; the
+      // .katex-display wrapper gets its block break below.
       var annotation = el.querySelector('annotation[encoding="application/x-tex"]');
-      selPut(state, annotation ? annotation.textContent : "");
+      var source = annotation ? annotation.textContent : el.getAttribute("data-kdx-tex");
+      selPut(state, source || "");
       return;
     }
     if (el.matches(SELECT_SKIP)) {

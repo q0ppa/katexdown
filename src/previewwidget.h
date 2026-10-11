@@ -137,8 +137,9 @@ private Q_SLOTS:
     // long-closed LazyKeep page) and while it is open (renderer-memory
     // maintenance: once the estimate passes a budget and the preview has been
     // quiet for a while, reclaim in place with a forced GC; the discard+reload
-    // fallback is used only for the image residue a GC cannot return, and only
-    // while the window is minimized — see reclaimAtIdle).
+    // fallback is used only for the image residue a GC cannot return, while the
+    // window is minimized or — with Settings::IdleVisible — on an idle visible
+    // preview; see reclaimAtIdle).
     void idleTick();
 
 private:
@@ -146,6 +147,9 @@ private:
     void render();
     void performExport(const QString &path);
     void runJs(const QString &code);
+    // Push the mirrored text into the page; when chargeDom is set, charge the
+    // element count the page returns to the renderer-memory estimate.
+    void runSetMarkdown(bool chargeDom);
     void loadPage();
     void openLink(const QUrl &url);
     // Fragment links: apply the pending anchor (m_pendingFragment) in the page
@@ -193,6 +197,9 @@ private:
     // of it by itself (no GC runs and Qt refuses to freeze a visible page), so
     // once the estimate passes a budget the renderer is recycled.
     void noteRenderWork(qint64 textBytes, bool navigation);
+    // Charge the dead Blink memory a full-document re-render strands, from the
+    // element count the page reports for the DOM it just built.
+    void noteRenderedDom(qint64 elementCount);
     void noteActivity();
     // Image-decode accounting: the page exposes a cumulative counter of the
     // decodes the *reader* caused (window.__kdxDecodeStats, see preview.js —
@@ -221,6 +228,10 @@ private:
     // KATEXDOWN_MEM_MINIMIZED env hook lets tests drive the image-residue
     // recycle deterministically under the offscreen harness.
     bool previewWindowMinimized() const;
+    // Whether the decoded-image residue may be released by recreating the page
+    // right now: minimized always, a visible preview only with
+    // Settings::IdleVisible (see reclaimAtIdle).
+    bool imageResidueReclaimAllowed() const;
     // Recycle bookkeeping: hide + discard the page, load a fresh one, restore
     // the panel. The cycle is driven by lifecycle events + idleTick retries.
     void beginRecycle();

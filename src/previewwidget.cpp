@@ -934,7 +934,7 @@ void PreviewWidget::performExport(const QString &path)
     // guaranteed to match the current buffer.
     noteRenderWork(m_text.size(), false);
     noteActivity();
-    runJs(QStringLiteral("window.__setMarkdown(%1);").arg(jsLiteral(m_text)));
+    runSetMarkdown(true);
     m_renderedOnce = true;
     // Re-render is synchronous in the page; give the compositor a moment and
     // then serialize the current DOM, styles and all.
@@ -1032,6 +1032,30 @@ void PreviewWidget::runJs(const QString &code)
     }
 }
 
+void PreviewWidget::runSetMarkdown(bool chargeDom)
+{
+    if (!m_loaded) {
+        return;
+    }
+    // The page answers with the element count of the DOM it just built. A
+    // re-render that replaced already-rendered content strands that much dead
+    // Blink memory (see noteRenderedDom), so the caller passes chargeDom for
+    // it; a page's first render replaces nothing and is never charged
+    // (Invariant 12).
+    m_web->page()->runJavaScript(
+        QStringLiteral("window.__setMarkdown(%1);").arg(jsLiteral(m_text)),
+        [this, chargeDom](const QVariant &elements) {
+            if (!chargeDom || !m_loaded || m_recycling) {
+                return; // a discard/recycle owns the estimate now
+            }
+            bool ok = false;
+            const qint64 count = elements.toLongLong(&ok);
+            if (ok) {
+                noteRenderedDom(count);
+            }
+        });
+}
+
 void PreviewWidget::applyImageMode()
 {
     if (!m_loaded) {
@@ -1115,8 +1139,13 @@ void PreviewWidget::render()
     if (m_renderedOnce) {
         noteRenderWork(m_text.size(), false);
     }
-    runJs(QStringLiteral("window.__setMarkdown(%1);").arg(jsLiteral(m_text)));
+    // The page answers with the element count of the DOM it just built; a
+    // re-render that replaced already-rendered content strands that much dead
+    // Blink memory (see noteRenderedDom). A page's first render replaces
+    // nothing, so it is never charged (Invariant 12).
+    const bool replacingContent = m_renderedOnce;
     m_renderedOnce = true;
+    runSetMarkdown(replacingContent);
     if (m_pendingScrollReset) {
         m_pendingScrollReset = false;
         runJs(QStringLiteral("window.scrollTo(0, 0);"));
@@ -1202,9 +1231,11 @@ void PreviewWidget::panelOpened()
 //     applyJsFlags merges). Measured 400-600 MB, ~40-150 ms, repeatable, with
 //     no navigation — this is what replaced the old same-document recycle.
 //   - Decoded-image memory is the one part a GC cannot return. It alone may
-//     still trigger a discard+reload (performMemoryRecycle), and only while
-//     the preview's window is minimized, i.e. while the user cannot see the
-//     page. A visible page is never reloaded.
+//     still trigger a discard+reload (performMemoryRecycle): always while the
+//     preview's window is minimized (invisible), and — when
+//     Settings::ImageReclaim is IdleVisible — also on a visible preview that
+//     has been quiet for the idle window and is unfocused (see reclaimAtIdle).
+//     By default a visible page is never reloaded.
 //
 // Both wait for the same gates: over budget (or the pure-time backstop),
 // quiet for the idle window, unfocused. Document switches reclaim as part of
@@ -1265,23 +1296,25 @@ void PreviewWidget::idleTick()
         return; // e.g. a load still settling
     }
     if (!m_web->isVisible()) {
-        return; // only act on a page that is shown (the image recycle has its own minimized gate)
+        return; // only act on a page that is shown (the image recycle has its own visibility gate)
     }
-    if (!recycleDue() || !recycleIdle() || webHasFocus()) {
-        // Not reclaiming on this tick. If the document can contain images, poll
-        // the page's counter of reader-caused decodes anyway: image decodes are
-        // dirt that arrives without a render or a navigation, and the poll
-        // callback re-checks the gates once the charge pushes the estimate over
-        // the budget.
-        if (m_textMayHaveImages && !m_decodePollPending) {
-            m_decodePollPending = true;
-            m_web->page()->runJavaScript(
-                QStringLiteral("window.__kdxDecodeStats ? window.__kdxDecodeStats() : '0:0'"),
-                [this](const QVariant &v) { handleDecodeStats(v.toString()); });
-        }
-        return;
+    if (recycleDue() && recycleIdle() && !webHasFocus()) {
+        reclaimAtIdle();
     }
-    reclaimAtIdle();
+    // Keep the image-decode accounting fresh whenever it can still change the
+    // decision. This must not be predicated on "not due": `recycleDue()` stays
+    // true once the max-age backstop has fired, or once a charge crossed the
+    // budget, and `reclaimAtIdle()` can legitimately decline to act (the image
+    // residue is under its threshold, or the policy refuses to recreate a
+    // visible preview). Stopping the poll there would freeze `m_imgCharge` and
+    // the residue could never reach the threshold again (the pre-existing bug
+    // this branch closes; see lazyrender.md).
+    if (m_textMayHaveImages && !m_decodePollPending && m_imgCharge < m_memBudgetBytes) {
+        m_decodePollPending = true;
+        m_web->page()->runJavaScript(
+            QStringLiteral("window.__kdxDecodeStats ? window.__kdxDecodeStats() : '0:0'"),
+            [this](const QVariant &v) { handleDecodeStats(v.toString()); });
+    }
 }
 
 // Run one renderer-memory maintenance cycle (see the idleTick comment for why
@@ -1504,6 +1537,24 @@ void PreviewWidget::noteRenderWork(qint64 textBytes, bool navigation)
     }
 }
 
+// Each element a full-document re-render replaces strands its node plus a
+// computed style and a layout object (Blink commonly spends ~1-2 kB per styled
+// element); the page reports the count after every render (`preview.js`). This
+// is the charge the text-length estimate above is blind to, and it is the
+// dominant one for the documents that hurt: 700 KaTeX formulas are a few kB of
+// markdown but ~100k elements, so text x factor would not cross the budget for
+// minutes and only the pure-time backstop would reclaim the renderer. 2 kB is
+// the conservative upper end of that range; the estimate over-charges on
+// purpose (a slightly-early reclaim is harmless, a late one is not — see
+// lazyrender.md).
+void PreviewWidget::noteRenderedDom(qint64 elementCount)
+{
+    constexpr qint64 kDeadBytesPerElement = 2048;
+    if (elementCount > 0) {
+        m_memEstimate += elementCount * kDeadBytesPerElement;
+    }
+}
+
 void PreviewWidget::noteActivity()
 {
     m_lastActivity.restart();
@@ -1538,7 +1589,9 @@ bool PreviewWidget::webHasFocus() const
 // repeatable). What it cannot return is decoded-image memory, so the estimate
 // keeps m_imgCharge (cleared only by a discard/freeze). If the page has no
 // window.gc (the user's own --js-flags won the merge) this disables itself
-// after one probe — it must never fall back to reloading a visible page.
+// after one probe — DOM churn must never be reclaimed by reloading a visible
+// page (that fallback is only for the decoded-image residue, and only under
+// Settings::ImageReclaim — see reclaimAtIdle).
 void PreviewWidget::reclaimInPlace()
 {
     if (!m_loaded || m_gcUnavailable || m_recycling || m_panelClosed) {
@@ -1579,16 +1632,33 @@ void PreviewWidget::reclaimAtIdle()
         reclaimInPlace();
         return;
     }
-    if (m_imgCharge >= m_memBudgetBytes && previewWindowMinimized()) {
-        // Only decoded images keep the estimate over budget, and the window is
-        // minimized: the discard+reload is invisible right now, so allow it
-        // (performMemoryRecycle keeps the scroll position and the image
-        // geometry, so the page is unchanged when the reader returns).
+    if (m_imgCharge >= m_memBudgetBytes && imageResidueReclaimAllowed()) {
+        // Only decoded images keep the estimate over budget, and recreating the
+        // page is the only primitive that returns them. It is always allowed
+        // while the window is minimized (invisible), and — when
+        // Settings::ImageReclaim is IdleVisible — on a visible preview too:
+        // this function only runs once the preview has been quiet for the idle
+        // window and while it is unfocused (the callers' gates).
+        // performMemoryRecycle keeps the scroll position and the image
+        // geometry, so the reader returns to the same content.
         performMemoryRecycle(true);
+        return;
     }
-    // Otherwise the image residue alone is over budget while the user can see
-    // the page: do nothing. A reload would be intrusive and a GC cannot reclaim
-    // it, so retrying would only burn CPU.
+    // Otherwise the image residue alone is over budget while the policy forbids
+    // recreating a visible page: do nothing. A GC cannot reclaim it, so
+    // retrying would only burn CPU.
+}
+
+// Whether the decoded-image residue may be released by recreating the page
+// right now. Minimized always allows it (the page is invisible); a visible
+// preview only when the user opted into it (Settings::IdleVisible) — and this
+// is only consulted after the idle-window and focus gates have passed.
+bool PreviewWidget::imageResidueReclaimAllowed() const
+{
+    if (previewWindowMinimized()) {
+        return true;
+    }
+    return Settings::self()->imageReclaim() == Settings::IdleVisible;
 }
 
 bool PreviewWidget::previewWindowMinimized() const

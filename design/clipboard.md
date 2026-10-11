@@ -86,9 +86,12 @@ code **Copy** button, the outline control) into the clipboard. The walker in
   level; a task-list checkbox as `[x] ` / `[ ] `
 - a table as one line per row of `\t`-joined cells, internal cell
   newlines/tabs flattened to spaces (same shape as browser/table paste)
-- images skipped; a KaTeX formula contributes its
-  `<annotation encoding="application/x-tex">` LaTeX source once (the MathML
-  and HTML copies of the formula are both skipped, or it would appear twice)
+- images skipped; a KaTeX formula contributes its LaTeX source once — read
+  from `data-kdx-tex` on the `.katex` element (KaTeX is rendered HTML-only,
+  see lazyrender.md Invariant 17), with a MathML `<annotation
+  encoding="application/x-tex">` still read as a fallback for a page that
+  carries one. The visible `.katex-html` copy is skipped so the formula cannot
+  appear twice
 - interactive chrome (`.kdx-copy-btn`, `#kdx-outline-btn`,
   `#kdx-outline-panel`) skipped
 
@@ -160,8 +163,10 @@ work; the web view's default menu is untouched.
   at a block boundary but keeps significant ones between inline siblings.
 - **Indentation is not inline text.** Marker strings carrying list indent must
   bypass the inline whitespace collapse, or `"  - "` collapses to `"- "`.
-- **KaTeX renders the formula twice** (MathML + visual HTML); copying both
-  duplicates the math. The MathML annotation is the single source.
+- **A formula must contribute its LaTeX exactly once.** KaTeX is rendered
+  HTML-only now, so the source rides on `data-kdx-tex` (the `.katex-html`
+  glyph copy is skipped); the MathML annotation remains a fallback. Copying
+  both the visual tree and the source would duplicate the math.
 - **The host callback can outlive the widget** (a document switch during the
   JS round-trip), so `copySelection()` holds the widget weakly.
 - **An exported file must not require the channel.** `window.qt` does not
@@ -181,8 +186,8 @@ work; the web view's default menu is untouched.
   string, chrome is absent, a partial selection is exact, a collapsed one is
   empty.
 - `selectionCopyOfMathKeepsTheLatex` — an inline and a display formula each
-  contribute their LaTeX annotation exactly once (not once per MathML/HTML
-  copy); skipped without the KaTeX data-dir assets.
+  contribute their LaTeX exactly once (from `data-kdx-tex`); skipped without
+  the KaTeX data-dir assets.
 - `ctrlCCopiesSelectionToClipboard` — a synthesized `Ctrl+C` on the web view's
   focus proxy puts `__kdxSelectionText()` on the clipboard.
 - `previewClaimsItsKeysFromTheShortcutMap` — the filter accepts

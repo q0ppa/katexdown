@@ -233,14 +233,19 @@ engine behind the web view accumulates what full re-renders leave behind, and
 Qt will not let a *visible* page be frozen or discarded. So while a preview
 stays open through a long session, Katexdown reclaims that memory **in place**:
 it estimates the dead memory a long-lived renderer accumulates (every full
-re-render costs it a chunk proportional to the document, and every photo your
+re-render costs it a chunk proportional to the document — measured from the
+rendered DOM it built, so a formula-heavy document, whose KaTeX element tree
+dwarfs its markdown, is charged like the tree it is — and every photo your
 scrolling decodes leaves a frame the renderer keeps) and, once that passes a
 budget while the preview has been quiet, asks the page for a garbage
 collection — measured, this returns hundreds of MB and lands back at the
 document's loaded footprint in a few tens of milliseconds, with no reload and
 nothing on screen moving. Decoded images are the one thing a garbage
-collection cannot return; that residue is reclaimed by recreating the page
-only while its window is minimized, so you never see it, and the scroll
+collection cannot return. By default that residue is reclaimed by recreating
+the page only while its window is minimized, so you never see it; the **Release
+image memory** setting can additionally allow it on a visible preview once the
+preview has been idle and unfocused (a brief, scroll-preserving refresh — see
+the settings table). Either way the scroll
 position and the image layout around it are kept for when you return. Only
 the images *your* scrolling decodes count towards the budget: the set a page
 decodes by itself — at load, and when a keystroke re-renders it — is exactly
@@ -264,7 +269,10 @@ needs a Kate restart.
 A preview page is also trimmed to the document at hand: KaTeX, the syntax
 highlighter and the YAML front-matter parser are only loaded when the current
 document actually uses math, fenced code blocks or front matter (a page
-refreshes itself once when you type such content in later).
+refreshes itself once when you type such content in later). Formulas are
+rendered HTML-only, without KaTeX's hidden MathML duplicate — that duplicate
+adds a second element tree per formula, and copying math still yields the
+exact LaTeX source.
 
 Inside a rendered page the same idea applies to images — the **Image memory
 mode** setting decides how much the web engine decodes at once:
@@ -336,7 +344,8 @@ Settings -> Configure Kate -> (Plugins -> enable `Katdown`) -> Katdown.
 | Style | GitHub / Match editor or system theme | GitHub uses GitHub's palette. Match recolors the same layout from your active editor theme. |
 | GitHub variant | Auto / Light / Dark | Which GitHub palette to use. Auto follows whether your system is light or dark. Only applies in GitHub style. |
 | Load media previews from remote URLs | On / Off (default) | When on, images referencing `http(s)` URLs are fetched and rendered. When off (the default), the preview loads no remote resources and works fully offline. Images with paths relative to the document always load regardless of this setting. |
-| JS memory cap | 0–1024 MB (0 = off; default 128) | Bounds the preview's JavaScript (V8) heap, so memory that full re-renders leave behind is reclaimed by the engine itself instead of only on a renderer restart. Free while a document's rendering fits under it; large or math-heavy documents can re-render slower under a low cap. Applies when the preview's web engine starts — change needs a Kate restart. An explicit `--js-flags=…` in the `QTWEBENGINE_CHROMIUM_FLAGS` environment variable overrides it. |
+| JS memory cap | 0–1024 MB (0 = off; default 64) | Bounds the preview's JavaScript (V8) heap, so memory that full re-renders leave behind is reclaimed by the engine itself instead of only on a renderer restart. Free while a document's rendering fits under it; large or math-heavy documents can re-render slower under a low cap. Applies when the preview's web engine starts — change needs a Kate restart. An explicit `--js-flags=…` in the `QTWEBENGINE_CHROMIUM_FLAGS` environment variable overrides it. |
+| Release image memory | Only when minimized (default) / Also when the preview is idle | Decoded images are the one kind of memory a preview cannot hand back while it stays alive — only recreating the page releases them. "Only when minimized" never refreshes a preview you can see; "Also when the preview is idle" recreates a visible, unfocused preview that has been quiet once enough images have decoded, so a long image-browsing session stays bounded. Content and scroll position are preserved; the preview may briefly show a still frame while it reloads. |
 | Section outline | H1–H6 checkboxes | Which heading levels the floating outline button in the preview lists; click an entry to jump to that section. H1–H5 are on by default; unchecking all hides the button. |
 | Copy button on code blocks | On (default) / Off | Shows a **Copy** button in the corner of every code block; clicking it copies the block's contents. The button is part of the rendered page, so exported HTML contains it exactly when this is on. |
 | Custom stylesheets | list | Files appended after the built-in style, in listed order. Relative paths resolve against the Katdown data dir. |

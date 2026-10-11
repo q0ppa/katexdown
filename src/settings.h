@@ -56,6 +56,26 @@ public:
         Adaptive = 1,
         MemorySaver = 2,
     };
+    // When the renderer-memory maintenance may recreate the page to release
+    // *decoded images*. Chromium never returns a decoded image frame on its
+    // own and nothing in the page can make it (parking, window.gc and
+    // clearHttpCache all fail); only renderer death does — see
+    // design/lazyrender.md, "Renderer-memory maintenance". The maintenance
+    // always reclaims decoded images when the window is minimized; this
+    // decides whether a visible preview may also be recreated once it has been
+    // idle:
+    //   MinimizedOnly  a preview the user can see is never recreated (default:
+    //                  the smallest footprint on the user's attention, at the
+    //                  cost of holding image memory until the window is
+    //                  minimized, a document is switched, or the panel closes)
+    //   IdleVisible    also recreate a visible, unfocused preview after the
+    //                  idle window — a brief refresh (the last frame stays on
+    //                  screen, content and scroll position survive) traded for
+    //                  keeping decoded-image memory bounded
+    enum ImageReclaim {
+        MinimizedOnly = 0,
+        IdleVisible = 1,
+    };
     // V8 old-space cap for the preview's renderer, in MB (see
     // design/lazyrender.md, "JS heap guard"). 64 MB is the default: paired
     // with the idle forced GC that hands the freed pages back, it keeps a
@@ -89,6 +109,13 @@ public:
     {
         return m_imageMode;
     }
+    // Whether a *visible* preview may be recreated to release decoded images
+    // once it has been idle (see the enum above); the minimized-window
+    // reclaim runs regardless.
+    ImageReclaim imageReclaim() const
+    {
+        return m_imageReclaim;
+    }
     // Renderer JS heap cap in MB, 0 = off. Only read at web-engine start
     // (see kdxchromiumflags.h); a change needs a Kate restart to take effect.
     int v8HeapCapMb() const
@@ -113,6 +140,7 @@ public:
     void setCodeCopyButton(bool enabled);
     void setLoadingMode(LoadingMode mode);
     void setImageMode(ImageMode mode);
+    void setImageReclaim(ImageReclaim mode);
     void setV8HeapCapMb(int mb);
     void setCustomCssFiles(const QStringList &files);
     void setTocLevels(const QList<int> &levels);
@@ -137,6 +165,9 @@ private:
     LoadingMode m_loadingMode = LazyKeep;
     // Image decode policy; Auto by default (see enum above).
     ImageMode m_imageMode = Adaptive;
+    // Decoded-image reclaim policy; a visible preview is never recreated by
+    // default (see enum above).
+    ImageReclaim m_imageReclaim = MinimizedOnly;
     // V8 old-space cap in MB applied to the preview's renderer process via
     // QTWEBENGINE_CHROMIUM_FLAGS (see kdxchromiumflags.h). 0 disables it.
     int m_v8HeapCapMb = DefaultV8HeapCapMb;

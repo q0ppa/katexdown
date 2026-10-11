@@ -41,6 +41,9 @@ private:
     QComboBox *m_variant = nullptr;
     QComboBox *m_loading = nullptr;
     QComboBox *m_imageMode = nullptr;
+    // When decoded-image memory may be reclaimed by recreating the page
+    // (Settings::ImageReclaim).
+    QComboBox *m_imageReclaim = nullptr;
     // Renderer JS heap cap in MB (0 = off); see Settings::v8HeapCapMb.
     QSpinBox *m_v8Cap = nullptr;
     QCheckBox *m_githubCss = nullptr;

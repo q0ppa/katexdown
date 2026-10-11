@@ -171,6 +171,13 @@ void RenderFeaturesTest::mathRendersWhenAssetsPresent()
     QVERIFY2(inlineCount >= 1, qPrintable(QStringLiteral("no inline math rendered (katex nodes: %1)").arg(inlineCount)));
     QVERIFY2(displayCount >= 1, qPrintable(QStringLiteral("no display math rendered (katex-display nodes: %1)").arg(displayCount)));
 
+    // KaTeX is rendered HTML-only: the hidden MathML copy is not built (it was
+    // a large share of the DOM nodes per formula), and the LaTeX source lives
+    // on the element for __kdxSelectionText() and assistive tech instead.
+    QCOMPARE(evalJs(preview.get(), QStringLiteral("document.querySelectorAll('#content .katex-mathml').length")).toInt(), 0);
+    QCOMPARE(evalJs(preview.get(), QStringLiteral("document.querySelectorAll('#content .katex[data-kdx-tex]').length")).toInt(), inlineCount);
+    QCOMPARE(evalJs(preview.get(), QStringLiteral("document.querySelectorAll('#content .katex[role=\"math\"][aria-label]').length")).toInt(), inlineCount);
+
     // No parse errors: throwOnError is off, but the formulas above are valid.
     const int errorCount = evalJs(preview.get(), QStringLiteral("document.querySelectorAll('.katex-error').length")).toInt();
     QCOMPARE(errorCount, 0);
@@ -996,7 +1003,7 @@ void RenderFeaturesTest::enginesAreLoadedOnlyWhenTheTextNeedsThem()
         return f.open(QIODevice::WriteOnly) && f.write(body) == body.size();
     };
     QVERIFY(writeAsset(QStringLiteral("katex.min.js"),
-                       QByteArrayLiteral("window.katex = { renderToString: function () { return ''; } };\n")));
+                       QByteArrayLiteral("window.katex = { renderToString: function () { return ''; } }; /*kdx-katex-engine*/\n")));
     // A no-op plugin: enough for markdown-it to accept the engine wiring.
     QVERIFY(writeAsset(QStringLiteral("texmath.min.js"),
                        QByteArrayLiteral("window.texmath = function () { return function () {}; };\n")));
@@ -1009,9 +1016,11 @@ void RenderFeaturesTest::enginesAreLoadedOnlyWhenTheTextNeedsThem()
     // typeof window.katex is useless here: the page always carries a
     // <style id="katex"> element, and element ids become window globals.
     // Check whether the engine script itself made it into the page instead.
+    // (Probe for the fake engine's sentinel, not a function name: preview.js
+    // itself calls katex.renderToString now, so that text is always on the page.)
     const QString katexMarker = QStringLiteral(
         "(function () { for (var i = 0; i < document.scripts.length; ++i) { "
-        "if (document.scripts[i].textContent.indexOf('renderToString') >= 0) return 'loaded'; } return 'absent'; })()");
+        "if (document.scripts[i].textContent.indexOf('kdx-katex-engine') >= 0) return 'loaded'; } return 'absent'; })()");
     QCOMPARE(evalJs(preview.get(), katexMarker), QStringLiteral("absent"));
     QCOMPARE(evalJs(preview.get(), QStringLiteral("typeof window.hljs")), QStringLiteral("undefined"));
     QCOMPARE(evalJs(preview.get(), QStringLiteral("typeof window.jsyaml")), QStringLiteral("undefined"));
@@ -1060,14 +1069,14 @@ void RenderFeaturesTest::numberMathLoadsKatexEngine()
         return f.open(QIODevice::WriteOnly) && f.write(body) == body.size();
     };
     QVERIFY(writeAsset(QStringLiteral("katex.min.js"),
-                       QByteArrayLiteral("window.katex = { renderToString: function () { return ''; } };\n")));
+                       QByteArrayLiteral("window.katex = { renderToString: function () { return ''; } }; /*kdx-katex-engine*/\n")));
     QVERIFY(writeAsset(QStringLiteral("texmath.min.js"),
                        QByteArrayLiteral("window.texmath = function () { return function () {}; };\n")));
     qputenv("KATEXDOWN_DATA_DIR", m_dir.path().toUtf8());
 
     const QString katexMarker = QStringLiteral(
         "(function () { for (var i = 0; i < document.scripts.length; ++i) { "
-        "if (document.scripts[i].textContent.indexOf('renderToString') >= 0) return 'loaded'; } return 'absent'; })()");
+        "if (document.scripts[i].textContent.indexOf('kdx-katex-engine') >= 0) return 'loaded'; } return 'absent'; })()");
 
     // Currency-ish prose that texmath itself would keep literal must not pull
     // KaTeX in: a lone amount (no closing dollar) and a pair whose closing $

@@ -74,6 +74,11 @@ void Settings::load()
         m_imageMode = Adaptive;
     }
     m_customCssFiles = cfg.readEntry("CustomCssFiles", QStringList());
+    // Missing key -> the conservative default (never recreate a visible
+    // preview for decoded images).
+    m_imageReclaim = cfg.readEntry("ImageReclaim", QStringLiteral("minimized")) == QLatin1String("idle")
+        ? IdleVisible
+        : MinimizedOnly;
     // Missing key -> the default cap; an explicit 0 means "off" and must
     // survive a save/load round-trip. Anything outside a sane range is
     // clamped to off/2048 rather than stored as-is.
@@ -95,6 +100,7 @@ void Settings::save() const
     cfg.writeEntry("LoadingMode", int(m_loadingMode));
     const char *imgMode = m_imageMode == MemorySaver ? "saver" : m_imageMode == DecodeAll ? "eager" : "auto";
     cfg.writeEntry("ImageMode", QString::fromLatin1(imgMode));
+    cfg.writeEntry("ImageReclaim", m_imageReclaim == IdleVisible ? QStringLiteral("idle") : QStringLiteral("minimized"));
     cfg.writeEntry("CustomCssFiles", m_customCssFiles);
     cfg.writeEntry("V8HeapCapMb", m_v8HeapCapMb);
     QStringList levels;
@@ -171,6 +177,16 @@ void Settings::setImageMode(ImageMode mode)
         return;
     }
     m_imageMode = mode;
+    save();
+    Q_EMIT changed();
+}
+
+void Settings::setImageReclaim(ImageReclaim mode)
+{
+    if (m_imageReclaim == mode) {
+        return;
+    }
+    m_imageReclaim = mode;
     save();
     Q_EMIT changed();
 }
