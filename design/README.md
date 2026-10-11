@@ -37,7 +37,7 @@ invariants a change must not break, and which pitfalls already cost us.
 
 | Doc | Topic |
 |-----|-------|
-| [lazyrender.md](lazyrender.md) | Preview loading & renderer memory: page lifetime (freeze/discard), per-document engine gating, image decode modes and the parking machinery, plus the renderer-memory maintenance (recycle) that bounds a long-session renderer |
+| [lazyrender.md](lazyrender.md) | Preview loading & renderer memory: page lifetime (freeze/discard), per-document engine gating, image decode modes, the parking machinery and the image geometry a reload is laid out with, plus the renderer-memory maintenance (an idle forced GC in place, with a discard+reload kept only for decoded images while the window is minimized) that bounds a long-session renderer |
 | [fragments.md](fragments.md) | Fragment links: heading anchor ids (GitHub slug rules, every level), and how a clicked `doc.md#section` link makes the preview jump to that section |
 | [print.md](print.md) | Export & print: interactive chrome (the floating outline control, the code-block copy button) is hidden by `@media print` in `base.css`, which the exported standalone .html embeds, so printed output is clean document content |
 | [clipboard.md](clipboard.md) | Clipboard: copying from the preview — the renderer-independent Qt-clipboard transport, the code-block copy button, selection→structured plain text (block/list/table shaping, chrome exclusion), and the Qt shortcut-map key claim that lets Ctrl+C reach the preview at all |

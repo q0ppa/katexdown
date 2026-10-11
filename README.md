@@ -229,30 +229,37 @@ or the sidebar button follows the same rules. Note: after a restart the panel
 opens closed in the lazy modes (that is the point — nothing loaded until asked).
 
 A rendered page never frees its renderer's memory on its own: the Chromium
-engine behind the web view only gives memory back when its process ends, and
+engine behind the web view accumulates what full re-renders leave behind, and
 Qt will not let a *visible* page be frozen or discarded. So while a preview
-stays open through a long session, Katexdown **recycles the renderer** for it:
+stays open through a long session, Katexdown reclaims that memory **in place**:
 it estimates the dead memory a long-lived renderer accumulates (every full
-re-render costs it a chunk proportional to the document, with no natural
-plateau — measured in the hundreds of MB for large documents) and, once that
-passes a budget, restarts the renderer at a moment you would not notice: a
-document switch already reloads the page, and when you simply pause reading or
-typing, the page is recreated in place with your scroll position kept (see
-`design/lazyrender.md`). Between recycles, switching between documents that
-live in the same folder re-renders in place instead of reloading the whole
-page, which keeps that churn small in the first place. The closed-panel rules
-above remain the biggest lever: a preview left closed releases its renderer
-entirely.
+re-render costs it a chunk proportional to the document, and every photo your
+scrolling decodes leaves a frame the renderer keeps) and, once that passes a
+budget while the preview has been quiet, asks the page for a garbage
+collection — measured, this returns hundreds of MB and lands back at the
+document's loaded footprint in a few tens of milliseconds, with no reload and
+nothing on screen moving. Decoded images are the one thing a garbage
+collection cannot return; that residue is reclaimed by recreating the page
+only while its window is minimized, so you never see it, and the scroll
+position and the image layout around it are kept for when you return. Only
+the images *your* scrolling decodes count towards the budget: the set a page
+decodes by itself — at load, and when a keystroke re-renders it — is exactly
+what every reload reproduces, so an image-heavy document sitting still is
+never touched (see `design/lazyrender.md`). A document switch can also
+recreate the page, which costs nothing extra — the switch reloads it anyway.
+Between reclaims, switching between documents that live in the same folder
+re-renders in place instead of reloading the whole page, which keeps that
+churn small in the first place. The closed-panel rules above remain the
+biggest lever: a preview left closed releases its renderer entirely.
 
-A renderer's JavaScript (V8) heap is additionally capped — 128 MB by default,
-configurable on the settings page (0 turns it off). V8 then reclaims what
-full re-renders leave behind itself, instead of the memory only ever coming
-back when the renderer process is recycled, so a long session plateaus rather
-than spiking between recycles. The cap is invisible while a document's
-rendering fits under it; very large or math-heavy documents can re-render
-slower under a low cap (the engine has to free memory mid-render), so it can
-be raised or switched off for those. The engine reads the cap only when it
-starts, so changing it needs a Kate restart.
+A renderer's JavaScript (V8) heap is additionally capped — 64 MB by default,
+configurable on the settings page (0 turns the cap off). The cap bounds the
+growth *between* the idle garbage collections; the collection is what hands
+the memory back. It is invisible while a document's rendering fits under it;
+very large or math-heavy documents can render slower under a low cap (the
+engine frees memory mid-render), so it can be raised or switched off for
+those. The engine reads the flags only when it starts, so changing the cap
+needs a Kate restart.
 
 A preview page is also trimmed to the document at hand: KaTeX, the syntax
 highlighter and the YAML front-matter parser are only loaded when the current

@@ -103,18 +103,18 @@ Q_SIGNALS:
 public Q_SLOTS:
     void applyTheme();
 
-    // Run one renderer-memory maintenance cycle right now: the page is told it
-    // is hidden and then Discarded, which makes QtWebEngine exit the renderer
-    // process — the only thing that reliably reclaims the dead memory a
-    // long-lived renderer accumulates (Qt refuses to freeze or discard a
-    // visible page, and a frozen page only purges when it was never shown).
-    // A fresh page is then loaded from the mirrored document state, so content
-    // comes back through the normal load pipeline. With restoreScroll the
-    // previous scroll position is kept (same-document idle recycle); document
-    // switches pass false (a new document starts at the top). The policy
-    // ticker (idleTick) decides when a recycle is safe; tests call this
-    // directly to pin the reclamation behavior. Returns false (and does
-    // nothing) unless the page is loaded and active and the panel is open.
+    // Run one discard+reload reclamation cycle right now: the page is told it
+    // is hidden and then Discarded (QtWebEngine exits the renderer process and
+    // returns every byte), then a fresh page is loaded from the mirrored
+    // document state. This is the *fallback* primitive: the primary reclaim is
+    // reclaimInPlace()'s forced GC, which returns the DOM/V8 churn without a
+    // navigation. Discard is what a GC cannot do — return decoded-image
+    // memory — so the idle policy uses it only for that residue, and only
+    // while the preview's window is minimized (an invisible reload). With
+    // restoreScroll the previous scroll position and image geometry are kept;
+    // document switches pass false (a new document starts at the top). Tests
+    // call this directly to pin the behavior. Returns false (and does nothing)
+    // unless the page is loaded and active and the panel is open.
     bool performMemoryRecycle(bool restoreScroll);
 
 protected:
@@ -135,9 +135,10 @@ private Q_SLOTS:
     void applyCodeCopy();
     // Periodic policy while the panel is closed (freeze on close, discard a
     // long-closed LazyKeep page) and while it is open (renderer-memory
-    // maintenance: recycle the renderer once the estimated dead memory since
-    // the last recycle passes a budget and the preview has been quiet for a
-    // while; see performMemoryRecycle).
+    // maintenance: once the estimate passes a budget and the preview has been
+    // quiet for a while, reclaim in place with a forced GC; the discard+reload
+    // fallback is used only for the image residue a GC cannot return, and only
+    // while the window is minimized — see reclaimAtIdle).
     void idleTick();
 
 private:
@@ -154,6 +155,12 @@ private:
     // the frozen snapshot when the editor tab is gone)?
     bool sameDocumentAsCurrent(const QUrl &doc) const;
     void applyMediaPolicy();
+    // Push the image boxes the previous page of this document recorded
+    // (m_imageDims) into a freshly loaded page, so a reload (the maintenance
+    // recycle, or the panel re-opening a discarded page) lays the document out
+    // exactly like the page it replaced instead of collapsing it to a much
+    // shorter document and moving the reader (see __setImageDims in preview.js).
+    void applyImageDims();
     QUrl baseUrl() const;
     // Assemble the self-contained page. engines is the bitmask (kEngine* in
     // previewwidget.cpp) of optional engines to inline: a page only carries the
@@ -187,12 +194,33 @@ private:
     // once the estimate passes a budget the renderer is recycled.
     void noteRenderWork(qint64 textBytes, bool navigation);
     void noteActivity();
-    // Image-decode accounting: the page exposes a cumulative decode counter
-    // (window.__kdxDecodeStats, see preview.js); idleTick polls it while an
-    // image-bearing document is open and charges the dead-memory estimate per
-    // decode, so a session that scrolls past photos dirties the renderer like
-    // text churn does (Chromium keeps decoded frames it will not return).
+    // Image-decode accounting: the page exposes a cumulative counter of the
+    // decodes the *reader* caused (window.__kdxDecodeStats, see preview.js —
+    // the page's own load-time set never counts, which is what keeps the
+    // maintenance from recycling an idle image-heavy preview in a loop);
+    // idleTick polls it while an image-bearing document is open and charges
+    // the dead-memory estimate per decode, so a session that scrolls past
+    // photos dirties the renderer like text churn does (Chromium keeps decoded
+    // frames it will not return).
     void handleDecodeStats(const QString &stats);
+    // Reclaim the dead DOM/V8 memory a re-render stranded *without* touching
+    // the page: call the page's window.gc() (present because applyJsFlags
+    // merges --expose-gc). The estimate drops to the image charge, which a GC
+    // cannot return; if the page has no window.gc (the user's own --js-flags
+    // won the merge) this is a one-time no-op — never a visible reload.
+    void reclaimInPlace();
+    // The idle moment's decision (callers have already checked loaded,
+    // Active, visible, recycleDue(), quiet, not focused): reclaim the
+    // reclaimable render charge in place; fall back to the discard+reload only
+    // for the decoded-image residue and only while the preview's window is
+    // minimized (i.e. invisible to the user). A visible page is never
+    // reloaded, and a GC that cannot help is not retried in a loop.
+    void reclaimAtIdle();
+    // Is the preview's top-level window minimized (the page cannot be seen)?
+    // The closed-panel path is handled separately by idleTick. The
+    // KATEXDOWN_MEM_MINIMIZED env hook lets tests drive the image-residue
+    // recycle deterministically under the offscreen harness.
+    bool previewWindowMinimized() const;
     // Recycle bookkeeping: hide + discard the page, load a fresh one, restore
     // the panel. The cycle is driven by lifecycle events + idleTick retries.
     void beginRecycle();
@@ -202,8 +230,10 @@ private:
     bool recycleIdle() const;
     bool webHasFocus() const;
     void readMemTuning();
-    // Scroll restoration for a same-document recycle: the page answers
-    // window.scrollY asynchronously, then the cycle starts.
+    // Scroll and geometry restoration for a same-document recycle: the page
+    // answers with one JSON snapshot of window.scrollY and the image boxes it
+    // recorded (window.__kdxRecycleState), captured in one call because both
+    // belong to the moment before the discard; the cycle then starts.
     void startRecycleAfterScrollQuery(double scrollY);
 
     QPointer<KTextEditor::MainWindow> m_mainWindow;
@@ -224,13 +254,25 @@ private:
     // setHtml navigation — see attachDocument.
     QUrl m_pageUrl;
     // Renderer-memory maintenance: estimated dead renderer memory since the
-    // last recycle, the budget that triggers a recycle, the quiet window a
-    // same-document recycle waits for (no text change, input or pending work;
-    // document switches recycle as part of the switch instead), and a
-    // pure-time backstop so slow leaks (e.g. infrequent tab switches) still
-    // get recycled. Tunable via env (KATEXDOWN_MEM_*) for tests; see
+    // last reclaim, the budget that triggers one, the quiet window an idle
+    // reclaim waits for (no text change, input or pending work; document
+    // switches reclaim as part of the switch instead), and a pure-time
+    // backstop so slow leaks (e.g. infrequent tab switches) still get
+    // reclaimed. Tunable via env (KATEXDOWN_MEM_*) for tests; see
     // readMemTuning().
     qint64 m_memEstimate = 0;
+    // The image-decode part of m_memEstimate. A forced GC returns the DOM/V8
+    // garbage a re-render stranded but not decoded-image memory, so only this
+    // part survives a reclaimInPlace(); it is cleared by a discard/freeze
+    // (which do return images). Keeping it separate is also what stops a GC
+    // from running in a loop on an image-heavy document it cannot help — that
+    // residue is the discard+reload's job, and only while the window is
+    // minimized.
+    qint64 m_imgCharge = 0;
+    // Set once the page answered that window.gc does not exist (the user's own
+    // --js-flags won the merge). No in-place reclamation is possible then; the
+    // estimate is left alone and no visible reload is attempted.
+    bool m_gcUnavailable = false;
     qint64 m_memBudgetBytes = 128ll * 1024 * 1024;
     int m_memIdleMs = 6000;
     int m_memMaxAgeMs = 180000;
@@ -261,6 +303,16 @@ private:
     // Scroll position to restore once the fresh page of a same-document
     // recycle has rendered (negative = none).
     double m_recycleScrollY = -1;
+    // Where the cycle is: the discard was actually delivered (its handler has
+    // already started the fresh load), so idleTick must not retry the discard
+    // on the fresh page — that would kill the load before it finishes.
+    bool m_recycleDiscarded = false;
+    // Image boxes the document's pages have recorded, as a JSON object of
+    // src -> [width, height] (empty = none). Captured from the page before a
+    // same-document recycle discards it and pushed back into the fresh page
+    // (applyImageDims), so a reload never collapses the document layout and
+    // moves the reader; cleared when another document is attached.
+    QString m_imageDims;
     // Fallback: if the fresh load never finishes (or a discard never sticks),
     // this timer un-hides the page / aborts the cycle so the preview can never
     // get stuck hidden.

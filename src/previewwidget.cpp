@@ -457,14 +457,15 @@ PreviewWidget::PreviewWidget(KTextEditor::MainWindow *mainWindow, KTextEditor::V
     : QWidget(parent)
     , m_mainWindow(mainWindow)
 {
-    // Apply the configured V8 heap cap before this widget creates its own
-    // profile below (which is what starts the web engine when the preview is
-    // the first QWebEngine user in the process — see kdxchromiumflags.h).
-    // The plugin constructor already tried this at plugin load; repeating it
-    // here covers direct use (the tests drive this widget without the
-    // plugin) and makes the call order-independent. Idempotent; no-op when
-    // the environment already carries explicit --js-flags or the cap is off.
-    kdxchromiumflags::applyV8HeapCap(kdxchromiumflags::effectiveV8HeapCapMb(Settings::self()->v8HeapCapMb()));
+    // Apply the configured renderer JS flags (V8 heap cap + --expose-gc)
+    // before this widget creates its own profile below (which is what starts
+    // the web engine when the preview is the first QWebEngine user in the
+    // process — see kdxchromiumflags.h). The plugin constructor already tried
+    // this at plugin load; repeating it here covers direct use (the tests
+    // drive this widget without the plugin) and makes the call order-
+    // independent. Idempotent; no-op when the environment already carries
+    // explicit --js-flags.
+    kdxchromiumflags::applyJsFlags(kdxchromiumflags::effectiveV8HeapCapMb(Settings::self()->v8HeapCapMb()));
 
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
@@ -525,6 +526,7 @@ PreviewWidget::PreviewWidget(KTextEditor::MainWindow *mainWindow, KTextEditor::V
         if (state == QWebEnginePage::LifecycleState::Discarded) {
             m_loaded = false;
             m_memEstimate = 0;
+            m_imgCharge = 0;
             m_lastRecycle.restart();
             // A discarded page's JS context (and its decode counter) is gone:
             // the fresh page starts from zero, and its first render replaces
@@ -537,6 +539,7 @@ PreviewWidget::PreviewWidget(KTextEditor::MainWindow *mainWindow, KTextEditor::V
             m_lastDecodeBytes = 0;
             if (m_recycling && !m_panelClosed && m_pendingExportPath.isEmpty()) {
                 // The recycle's fresh page: load the mirrored document now.
+                m_recycleDiscarded = true;
                 loadPage();
             } else if (m_recycling && m_panelClosed) {
                 // The panel closed mid-cycle: the closed-panel policy owns the
@@ -548,6 +551,7 @@ PreviewWidget::PreviewWidget(KTextEditor::MainWindow *mainWindow, KTextEditor::V
         } else if (state == QWebEnginePage::LifecycleState::Frozen) {
             // Closed-panel freeze ran Chromium's purge: the estimate is spent.
             m_memEstimate = 0;
+            m_imgCharge = 0;
             m_lastRecycle.restart();
             m_decodePollPending = false;
         }
@@ -605,6 +609,12 @@ PreviewWidget::PreviewWidget(KTextEditor::MainWindow *mainWindow, KTextEditor::V
         m_lastDecodeCount = 0;
         m_lastDecodeBytes = 0;
         applyTheme();
+        // Hand the fresh page the image boxes the page it replaces recorded
+        // *before* it renders: the document must lay out exactly like the one
+        // the reader was looking at, or the restored scroll position clamps to
+        // a collapsed layout and the reader lands somewhere else (see
+        // applyImageDims / __setImageDims in preview.js).
+        applyImageDims();
         // Apply the image mode before the first render so the page never
         // renders once in the default mode and again in the configured one
         // (__setImageMode re-renders only when the mode actually changes).
@@ -652,6 +662,10 @@ void PreviewWidget::attachDocument(KTextEditor::Document *doc, KTextEditor::View
     m_doc = doc;
     m_view = view;
     m_bufferStale = false;
+    // Image geometry is per document: the boxes a previous document recorded
+    // (m_imageDims) must never be applied to this one — the same relative
+    // image name can mean a different picture in another folder.
+    m_imageDims.clear();
     if (doc) {
         connect(doc, &KTextEditor::Document::textChanged, this, &PreviewWidget::scheduleRender);
         connect(doc, &KTextEditor::Document::documentUrlChanged, this, &PreviewWidget::onDocumentUrlChanged);
@@ -869,6 +883,10 @@ void PreviewWidget::onDocumentUrlChanged()
     if (m_doc && m_doc->url().isEmpty() && !m_url.isEmpty()) {
         return;
     }
+    // A save-as/rename can move the document to a folder where the same
+    // relative image names mean different pictures: the remembered boxes are
+    // only valid for the folder they were recorded in (see m_imageDims).
+    m_imageDims.clear();
     loadPage();
     updateTitle();
 }
@@ -1035,6 +1053,21 @@ void PreviewWidget::applyImageMode()
     runJs(QStringLiteral("window.__setImageMode('%1');").arg(QLatin1String(mode)));
 }
 
+// Give a freshly loaded page the image boxes the previous page of this
+// document recorded (m_imageDims, captured by performMemoryRecycle). Without
+// them a reload knows no image geometry at all — the markdown carries only the
+// src — so it lays the document out as if every image were zero-height; a
+// same-document recycle would restore the reader's scroll position against
+// that collapsed layout and land them somewhere else. Applied before the first
+// render, like the image mode.
+void PreviewWidget::applyImageDims()
+{
+    if (!m_loaded || m_imageDims.isEmpty()) {
+        return;
+    }
+    runJs(QStringLiteral("window.__setImageDims(%1);").arg(m_imageDims));
+}
+
 void PreviewWidget::applyCodeCopy()
 {
     if (!m_loaded) {
@@ -1161,15 +1194,22 @@ void PreviewWidget::panelOpened()
 
 // One policy tick, every second. While the panel is closed it walks the
 // freeze/discard state machine (a closed preview costs no CPU, and a
-// long-closed LazyKeep page releases its renderer). While the panel is open
-// it runs the renderer-memory maintenance: Chromium never reclaims the dead
-// memory a long-lived renderer accumulates on its own — Qt refuses to freeze
-// or discard a visible page, and the only reliable reclamation is letting the
-// renderer process die — so once the estimated dead memory since the last
-// recycle passes a budget (or a pure-time backstop expires) and the preview
-// has been quiet for a while, the renderer is recycled (performMemoryRecycle).
-// Document switches recycle as part of the switch instead (attachDocument),
-// which the user perceives as the normal reload a switch already is.
+// long-closed LazyKeep page releases its renderer). While the panel is open it
+// runs the renderer-memory maintenance:
+//
+//   - The dead DOM/V8 memory a re-render strands is returned **in place** by a
+//     forced GC (reclaimInPlace -> window.gc, exposed by the --expose-gc flag
+//     applyJsFlags merges). Measured 400-600 MB, ~40-150 ms, repeatable, with
+//     no navigation — this is what replaced the old same-document recycle.
+//   - Decoded-image memory is the one part a GC cannot return. It alone may
+//     still trigger a discard+reload (performMemoryRecycle), and only while
+//     the preview's window is minimized, i.e. while the user cannot see the
+//     page. A visible page is never reloaded.
+//
+// Both wait for the same gates: over budget (or the pure-time backstop),
+// quiet for the idle window, unfocused. Document switches reclaim as part of
+// the switch instead (attachDocument), which the user perceives as the normal
+// reload a switch already is.
 void PreviewWidget::idleTick()
 {
     if (m_panelClosed) {
@@ -1204,8 +1244,14 @@ void PreviewWidget::idleTick()
         // The discard may have been refused while Qt's visibility flag was
         // still catching up ("page is visible"); keep trying for a few ticks.
         // abortRecycle's timer is the backstop that guarantees the preview can
-        // never stay hidden.
-        if (!m_panelClosed && m_web->page()->lifecycleState() == QWebEnginePage::LifecycleState::Active
+        // never stay hidden. Only a discard that never happened is retried: a
+        // discard that *did* stick has already started the fresh page below
+        // (m_recycleDiscarded), and re-discarding that one would kill the
+        // fresh load before it finishes — the recycle would then be aborted
+        // with the reader's position lost (measured: a reload stuck in that
+        // retry loop never restored the scroll).
+        if (!m_panelClosed && !m_recycleDiscarded
+            && m_web->page()->lifecycleState() == QWebEnginePage::LifecycleState::Active
             && ++m_recycleDiscardTries <= 10) {
             m_web->page()->setVisible(false);
             m_web->page()->setLifecycleState(QWebEnginePage::LifecycleState::Discarded);
@@ -1219,13 +1265,14 @@ void PreviewWidget::idleTick()
         return; // e.g. a load still settling
     }
     if (!m_web->isVisible()) {
-        return; // only recycle a page the user can actually see
+        return; // only act on a page that is shown (the image recycle has its own minimized gate)
     }
     if (!recycleDue() || !recycleIdle() || webHasFocus()) {
-        // Not recycling on this tick. If the document can contain images, poll
-        // the page's decode counter anyway: image decodes are dirt that arrives
-        // without a render or a navigation, and the poll callback re-checks the
-        // recycle gates once the charge pushes the estimate over the budget.
+        // Not reclaiming on this tick. If the document can contain images, poll
+        // the page's counter of reader-caused decodes anyway: image decodes are
+        // dirt that arrives without a render or a navigation, and the poll
+        // callback re-checks the gates once the charge pushes the estimate over
+        // the budget.
         if (m_textMayHaveImages && !m_decodePollPending) {
             m_decodePollPending = true;
             m_web->page()->runJavaScript(
@@ -1234,7 +1281,7 @@ void PreviewWidget::idleTick()
         }
         return;
     }
-    performMemoryRecycle(true); // same document: keep the scroll position
+    reclaimAtIdle();
 }
 
 // Run one renderer-memory maintenance cycle (see the idleTick comment for why
@@ -1242,9 +1289,11 @@ void PreviewWidget::idleTick()
 // its renderer process exits and every byte it ever held is returned — and a
 // fresh page is then loaded from the mirrored document state, so content
 // returns through the normal load pipeline. restoreScroll keeps the previous
-// scroll position (same-document idle recycle); document-switch recycles pass
-// false (a new document starts at the top). Public so tests can drive it
-// directly; the policy ticker applies the quiet/focus/visibility gates first.
+// scroll position (same-document idle recycle), together with the image boxes
+// the fresh page needs to lay out with (see applyImageDims); document-switch
+// recycles pass false (a new document starts at the top and has no geometry to
+// carry over). Public so tests can drive it directly; the policy ticker
+// applies the quiet/focus/visibility gates first.
 bool PreviewWidget::performMemoryRecycle(bool restoreScroll)
 {
     if (!m_loaded || m_recycling || m_panelClosed || !m_pendingExportPath.isEmpty()
@@ -1256,11 +1305,32 @@ bool PreviewWidget::performMemoryRecycle(bool restoreScroll)
     }
     m_recycling = true;
     m_recycleDiscardTries = 0;
+    m_recycleDiscarded = false;
     if (restoreScroll) {
-        // window.scrollY answers asynchronously; start the cycle once we have it.
-        m_web->page()->runJavaScript(QStringLiteral("window.scrollY"), [this](const QVariant &v) {
-            startRecycleAfterScrollQuery(v.toDouble());
-        });
+        // Where the reader is and what the fresh page needs to lay out like
+        // this one (window.__kdxRecycleState answers both at once) come back
+        // asynchronously; start the cycle once we have them. One call on
+        // purpose: a runJavaScript callback cannot survive the discard, so
+        // everything the fresh page needs must be captured before it.
+        m_web->page()->runJavaScript(
+            QStringLiteral("window.__kdxRecycleState ? window.__kdxRecycleState() "
+                           ": JSON.stringify({y: window.scrollY, dims: {}})"),
+            [this](const QVariant &v) {
+                double scrollY = -1;
+                QJsonParseError err = {};
+                const QJsonDocument doc = QJsonDocument::fromJson(v.toString().toUtf8(), &err);
+                if (err.error == QJsonParseError::NoError && doc.isObject()) {
+                    const QJsonObject state = doc.object();
+                    scrollY = state.value(QStringLiteral("y")).toDouble(-1);
+                    const QJsonObject dims = state.value(QStringLiteral("dims")).toObject();
+                    // A set of boxes, never the scroll position alone: this is
+                    // what makes the reload lay out like the page it replaced.
+                    if (!dims.isEmpty()) {
+                        m_imageDims = QString::fromUtf8(QJsonDocument(dims).toJson(QJsonDocument::Compact));
+                    }
+                }
+                startRecycleAfterScrollQuery(scrollY);
+            });
     } else {
         startRecycleAfterScrollQuery(-1);
     }
@@ -1273,6 +1343,9 @@ void PreviewWidget::startRecycleAfterScrollQuery(double scrollY)
         return; // aborted while the query was in flight
     }
     m_recycleScrollY = scrollY;
+    if (qEnvironmentVariableIsSet("KATEXDOWN_DEBUG")) {
+        qDebug() << "[katexdown] recycle: reader position" << scrollY << "and" << m_imageDims.size() << "bytes of image geometry captured";
+    }
     beginRecycle();
 }
 
@@ -1313,9 +1386,13 @@ void PreviewWidget::finalizeRecycle()
     m_recycleTimer->stop();
     m_recycling = false;
     m_recycleDiscardTries = 0;
+    m_recycleDiscarded = false;
     if (!m_panelClosed) {
         m_web->page()->setVisible(true);
         if (m_recycleScrollY >= 0) {
+            if (qEnvironmentVariableIsSet("KATEXDOWN_DEBUG")) {
+                qDebug() << "[katexdown] recycle: fresh page rendered, restoring reader position" << m_recycleScrollY;
+            }
             runJs(QStringLiteral("window.scrollTo(0, %1);").arg(m_recycleScrollY, 0, 'f', 1));
         }
     }
@@ -1331,8 +1408,12 @@ void PreviewWidget::abortRecycle()
     if (!m_recycling) {
         return;
     }
+    if (qEnvironmentVariableIsSet("KATEXDOWN_DEBUG")) {
+        qDebug() << "[katexdown] recycle: aborting (the discard or the fresh load did not complete)";
+    }
     m_recycleTimer->stop();
     m_recycling = false;
+    m_recycleDiscarded = false;
     m_recycleScrollY = -1;
     if (!m_panelClosed) {
         m_web->page()->setVisible(true);
@@ -1340,13 +1421,16 @@ void PreviewWidget::abortRecycle()
     noteActivity();
 }
 
-// The page answered the 1 Hz decode poll: charge any decodes that happened
+// The page answered the 1 Hz decode poll: charge the decodes the reader caused
 // since the last poll against the dead-memory estimate, then apply the same
 // gates idleTick would (panel open, page loaded/active/visible, quiet, not
 // focused) and recycle when the budget is now crossed. Without this an
 // image-heavy reading session accumulates sticky decoded frames the renderer
-// never returns (measured at ~8-10 MB per photo scrolled past, in every image
-// mode) while the estimate stays low and the maintenance never fires.
+// never returns (measured at ~8-10 MB per photo scrolled past) while the
+// estimate stays low and the maintenance never fires. Decodes the page
+// performed by itself never reach this counter (see preview.js): they are the
+// live set a fresh page reproduces anyway, so charging them would recycle an
+// idle image-heavy preview in an endless loop instead of reclaiming anything.
 void PreviewWidget::handleDecodeStats(const QString &stats)
 {
     m_decodePollPending = false;
@@ -1374,6 +1458,12 @@ void PreviewWidget::handleDecodeStats(const QString &stats)
     }
     if (charge > 0) {
         m_memEstimate += charge;
+        m_imgCharge += charge;
+        // A charged decode means the reader is here and moving the viewport:
+        // count it as activity, so the recycle waits for their next quiet
+        // moment instead of reloading the page under them while they scroll
+        // (the charge stays; only the idle gate moves).
+        noteActivity();
         if (qEnvironmentVariableIsSet("KATEXDOWN_DEBUG")) {
             qDebug() << "[katexdown] image decodes since last poll:" << dCount << "charging" << charge << "bytes";
         }
@@ -1391,7 +1481,7 @@ void PreviewWidget::handleDecodeStats(const QString &stats)
     if (!recycleDue() || !recycleIdle() || webHasFocus()) {
         return;
     }
-    performMemoryRecycle(true);
+    reclaimAtIdle();
 }
 
 // Renderer-memory estimate (see the maintenance design in lazyrender.md): a
@@ -1439,6 +1529,75 @@ bool PreviewWidget::webHasFocus() const
     }
     QWidget *proxy = m_web->focusProxy();
     return proxy && proxy->hasFocus();
+}
+
+// Reclaim the dead memory a re-render stranded *without* navigating: ask the
+// page for a forced GC (window.gc, exposed because applyJsFlags merges
+// --expose-gc). This is the maintenance's primary primitive: it returns the
+// dominant DOM/V8 churn in place (measured 400-600 MB, ~40-150 ms, no reload,
+// repeatable). What it cannot return is decoded-image memory, so the estimate
+// keeps m_imgCharge (cleared only by a discard/freeze). If the page has no
+// window.gc (the user's own --js-flags won the merge) this disables itself
+// after one probe — it must never fall back to reloading a visible page.
+void PreviewWidget::reclaimInPlace()
+{
+    if (!m_loaded || m_gcUnavailable || m_recycling || m_panelClosed) {
+        return;
+    }
+    if (qEnvironmentVariableIsSet("KATEXDOWN_DEBUG")) {
+        qDebug() << "[katexdown] reclaim-in-place: window.gc(), estimate" << m_memEstimate << "image charge" << m_imgCharge;
+    }
+    m_web->page()->runJavaScript(
+        QStringLiteral("typeof window.gc === 'function' ? (window.gc(), '1') : '0'"),
+        [this](const QVariant &v) {
+            if (v.toString() != QLatin1String("1")) {
+                // No --expose-gc reached the engine. There is no in-place
+                // reclamation; stop trying and leave the page alone.
+                m_gcUnavailable = true;
+                if (qEnvironmentVariableIsSet("KATEXDOWN_DEBUG")) {
+                    qDebug() << "[katexdown] reclaim-in-place unavailable: window.gc missing";
+                }
+                return;
+            }
+            // The renderer is clean again apart from decoded images, which a GC
+            // cannot return: the estimate drops to that residue, and the
+            // max-age clock restarts because the reclaim really happened.
+            m_memEstimate = m_imgCharge;
+            m_lastRecycle.restart();
+            if (qEnvironmentVariableIsSet("KATEXDOWN_DEBUG")) {
+                qDebug() << "[katexdown] reclaim-in-place done; estimate now" << m_memEstimate;
+            }
+        });
+}
+
+// Decide what an idle, over-budget, visible, unfocused preview does. Callers
+// have already applied those gates and recycleIdle()'s quiet window.
+void PreviewWidget::reclaimAtIdle()
+{
+    if (m_memEstimate > m_imgCharge) {
+        // There is DOM/V8 churn a GC can return: do that, in place.
+        reclaimInPlace();
+        return;
+    }
+    if (m_imgCharge >= m_memBudgetBytes && previewWindowMinimized()) {
+        // Only decoded images keep the estimate over budget, and the window is
+        // minimized: the discard+reload is invisible right now, so allow it
+        // (performMemoryRecycle keeps the scroll position and the image
+        // geometry, so the page is unchanged when the reader returns).
+        performMemoryRecycle(true);
+    }
+    // Otherwise the image residue alone is over budget while the user can see
+    // the page: do nothing. A reload would be intrusive and a GC cannot reclaim
+    // it, so retrying would only burn CPU.
+}
+
+bool PreviewWidget::previewWindowMinimized() const
+{
+    if (qEnvironmentVariableIsSet("KATEXDOWN_MEM_MINIMIZED")) {
+        return true; // test hook: the offscreen harness cannot always minimize
+    }
+    const QWidget *top = window();
+    return top && top->isMinimized();
 }
 
 void PreviewWidget::readMemTuning()

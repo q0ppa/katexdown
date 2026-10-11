@@ -105,8 +105,9 @@ ConfigPage::ConfigPage(QWidget *parent)
 
     // Renderer JS heap cap: the preview's renderer never collects the garbage
     // full re-renders leave behind on its own, so a cap makes V8 collect under
-    // pressure and turns unbounded growth into a bounded plateau (see
-    // design/lazyrender.md, "JS heap guard"). 0 disables the cap.
+    // pressure and keeps the growth between the idle forced GCs small (see
+    // design/lazyrender.md, "JS heap guard"). 0 disables the cap; the forced
+    // GC (and --expose-gc) still runs, because that is what returns the memory.
     m_v8Cap = new QSpinBox(this);
     m_v8Cap->setRange(0, 1024);
     m_v8Cap->setSingleStep(64);
@@ -114,14 +115,12 @@ ConfigPage::ConfigPage(QWidget *parent)
     m_v8Cap->setSpecialValueText(i18n("Off — Chromium's default (no cap)"));
     form->addRow(i18n("JS memory cap:"), m_v8Cap);
     auto *v8Hint = new QLabel(
-        i18n("Bounds the preview's JavaScript heap (V8), in MB — the renderer otherwise never \n"
-             "returns the memory that full re-renders of a document leave behind, and only a \n"
-             "renderer restart reclaims it. The cap is free while a document's rendering fits \n"
-             "under it and steps in once a session re-renders large documents again and again. \n"
-             "Very large or math-heavy documents can render slower with a low cap; raise it or \n"
-             "turn it off for those. Default 128 MB. Applies when the preview's web engine starts, \n"
-             "so a change needs a Kate restart. An explicit --js-flags=… in the environment's \n"
-             "QTWEBENGINE_CHROMIUM_FLAGS overrides this setting."),
+        i18n("Bounds the preview's JavaScript heap (V8), in MB — a long-lived renderer otherwise \n"
+             "accumulates the memory that full re-renders of a document leave behind. The preview \n"
+             "also hands that memory back in place with an idle garbage collection, so the cap \n"
+             "only has to cover the peak between collections. Default 64 MB. Applies when the \n"
+             "preview's web engine starts, so a change needs a Kate restart. An explicit \n"
+             "--js-flags=… in the environment's QTWEBENGINE_CHROMIUM_FLAGS overrides this setting."),
         this);
     v8Hint->setWordWrap(true);
     v8Hint->setEnabled(false);

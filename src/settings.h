@@ -57,11 +57,13 @@ public:
         MemorySaver = 2,
     };
     // V8 old-space cap for the preview's renderer, in MB (see
-    // design/lazyrender.md, "JS heap guard"). 128 MB is the default: it is
-    // invisible for documents whose per-render working set stays under it and
-    // bounds the unbounded per-render growth of large-document sessions. 0
-    // disables the cap (Chromium's own, effectively unbounded, default).
-    static constexpr int DefaultV8HeapCapMb = 128;
+    // design/lazyrender.md, "JS heap guard"). 64 MB is the default: paired
+    // with the idle forced GC that hands the freed pages back, it keeps a
+    // long-lived renderer near its loaded footprint (measured) while staying
+    // invisible for typical documents. 0 disables the cap (Chromium's own,
+    // effectively unbounded, default); the forced GC still runs, because
+    // --expose-gc is merged regardless of the cap.
+    static constexpr int DefaultV8HeapCapMb = 64;
 
     static Settings *self();
 

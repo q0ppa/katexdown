@@ -11,7 +11,7 @@
  * in practice is the moment the first renderer process would spawn). There is
  * no runtime API, so the only way to influence the renderer's V8 is to make
  * sure the flag is in the environment before that happens. Callers therefore
- * run applyV8HeapCap() as early as possible:
+ * run applyJsFlags() as early as possible:
  *
  *   - the plugin constructor (Kate loads plugins before it creates any tool
  *     view, so this is normally before any QWebEngine object exists), and
@@ -26,41 +26,57 @@
  *
  * Why a cap at all (measured, Qt 6.11 / Chromium 140, see design/lazyrender.md
  * "JS heap guard"): a Chromium renderer never major-GCs on its own, so every
- * full-document re-render leaves the replaced DOM tree stranded in the V8 old
- * space — renderer RSS grows by tens to hundreds of MB per render with no
- * plateau, and only a renderer restart returns it. Capping the V8 old space
- * (`--js-flags=--max-old-space-size=N`) makes V8 collect under pressure, which
- * turns that unbounded growth into a bounded plateau. The cap is invisible
- * while a document's per-render working set stays under it (typical docs) and
- * only costs GC time when a render genuinely exceeds it (very large or
- * math-heavy documents) — which is exactly when the unbounded growth would
- * otherwise be worst.
+ * full-document re-render leaves the replaced DOM tree stranded — renderer RSS
+ * grows by tens to hundreds of MB per render with no plateau. Capping the V8
+ * old space (`--js-flags=--max-old-space-size=N`) makes V8 collect under
+ * pressure, which turns unbounded growth into a plateau. The cap is invisible
+ * while a document's per-render working set stays under it and only costs GC
+ * time when a render genuinely exceeds it (very large or math-heavy documents).
+ *
+ * Why --expose-gc (measured, see the maintenance design): the cap bounds the
+ * growth between collections but never hands the freed pages back. The
+ * maintenance therefore also needs `window.gc()`, which an explicit forced GC
+ * exposes in the page; calling it at an idle moment returns 400-600 MB in
+ * place, repeatably, with no reload (the dominant DOM/V8 churn; decoded images
+ * are the part a GC cannot return). --expose-gc is therefore always merged,
+ * even when the cap is off, because it is the reclamation primitive itself.
+ * If the user set their own --js-flags, neither is merged: window.gc() may be
+ * missing, and the maintenance then simply does not reclaim in place — it must
+ * never fall back to reloading a page the user is looking at.
  */
 namespace kdxchromiumflags
 {
-// Merge the V8 old-space cap into QTWEBENGINE_CHROMIUM_FLAGS.
+// Merge the renderer JS flags into QTWEBENGINE_CHROMIUM_FLAGS.
+//
+// Both flags travel in one --js-flags switch (Chromium reads only the first
+// --js-flags switch, so they have to be comma-joined):
+//   - --expose-gc always: exposes window.gc(), the maintenance's in-place
+//     reclamation primitive.
+//   - --max-old-space-size=<cap> only when capMb > 0: bounds the V8 old space
+//     between those GCs.
 //
 // Rules:
-//   - capMb <= 0  -> nothing (the stored setting "off" leaves Chromium's own
-//                    default, i.e. effectively unbounded).
 //   - the environment already contains "--js-flags" -> nothing. An explicit
-//     --js-flags (e.g. a user's --js-flags=--expose-gc) means the user owns
-//     V8 tuning; appending a second --js-flags switch would be silently
-//     dropped by Chromium (it reads the first one), so we must not pretend
-//     the cap is active.
-//   - otherwise append "--js-flags=--max-old-space-size=<cap>" (as one
-//     argument; QTWEBENGINE_CHROMIUM_FLAGS is space-split).
-inline void applyV8HeapCap(int capMb)
+//     --js-flags (e.g. a user's --js-flags=--expose-gc) means the user owns V8
+//     tuning; appending a second --js-flags switch would be silently dropped by
+//     Chromium (it reads the first one), so we must not pretend either flag is
+//     active.
+//   - capMb <= 0  -> append "--js-flags=--expose-gc".
+//   - otherwise    -> append "--js-flags=--max-old-space-size=<cap>,--expose-gc"
+//     (as one argument; QTWEBENGINE_CHROMIUM_FLAGS is space-split).
+inline void applyJsFlags(int capMb)
 {
-    if (capMb <= 0) {
-        return;
-    }
     QByteArray flags = qgetenv("QTWEBENGINE_CHROMIUM_FLAGS");
     if (flags.contains("--js-flags")) {
         return; // explicit V8 flags win
     }
-    QByteArray add = QByteArrayLiteral("--js-flags=--max-old-space-size=");
-    add += QByteArray::number(capMb);
+    QByteArray add = QByteArrayLiteral("--js-flags=");
+    if (capMb > 0) {
+        add += QByteArrayLiteral("--max-old-space-size=");
+        add += QByteArray::number(capMb);
+        add += ',';
+    }
+    add += QByteArrayLiteral("--expose-gc");
     if (!flags.isEmpty()) {
         flags += ' ';
     }

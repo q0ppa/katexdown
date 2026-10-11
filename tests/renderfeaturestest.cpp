@@ -9,9 +9,11 @@
 
 #include <QApplication>
 #include <QClipboard>
+#include <QColor>
 #include <QDebug>
 #include <QDeadlineTimer>
 #include <QFile>
+#include <QImage>
 #include <QKeyEvent>
 #include <QStringList>
 #include <QWidget>
@@ -113,6 +115,7 @@ private Q_SLOTS:
     void previewClaimsItsKeysFromTheShortcutMap();
     void imageModesControlDecoding();
     void parkingPreservesTheImageBox();
+    void rememberedImageBoxesShapeAFreshReload();
     void relativeCssResolvesAgainstDataDir();
     void outlineListsConfiguredHeadings();
     void fragmentLinksJumpToSections();
@@ -571,6 +574,23 @@ void RenderFeaturesTest::imageModesControlDecoding()
         "return im.getAttribute('src') + '|' + im.getAttribute('loading') + '|' + im.getAttribute('data-kdx') + '|' + im.getAttribute('width'); })()");
     QCOMPARE(evalJs(preview.get(), serializeImg), png + QStringLiteral("|null|null|null"));
 
+    // The maintenance charge counts only the image decodes the *reader* caused.
+    // Eager mode decodes everything by itself, so not even a forced re-decode
+    // after a scroll input is charged — a recycle there would only decode the
+    // same set again (this is the accounting that kept an idle image-heavy
+    // preview reloading itself forever).
+    evalJs(preview.get(), QStringLiteral("window.dispatchEvent(new WheelEvent('wheel')); 'ok'"));
+    evalJs(preview.get(), QStringLiteral(
+        "(function () { var i = document.querySelector('#content img'); var s = i.getAttribute('src'); "
+        "i.removeAttribute('src'); i.setAttribute('src', s); return 'ok'; })()"));
+    {
+        QDeadlineTimer settle(900);
+        while (!settle.hasExpired()) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+        }
+    }
+    QCOMPARE(evalJs(preview.get(), QStringLiteral("window.__kdxDecodeStats()")), QStringLiteral("0:0"));
+
     // Memory-saver: lazy attributes; the image decodes near the top (its box
     // gets recorded for stable placeholders) ...
     Settings::self()->setImageMode(Settings::MemorySaver);
@@ -589,11 +609,20 @@ void RenderFeaturesTest::imageModesControlDecoding()
     // Export serialization still carries the real src, machinery stripped.
     QCOMPARE(evalJs(preview.get(), serializeImg), png + QStringLiteral("|null|null|null"));
 
-    // Scrolling back to the top restores the image in front of the viewport.
+    // Scrolling back to the top restores the image in front of the viewport —
+    // and that decode *is* the reader's, so it is charged (unlike the eager
+    // mode re-decode above). The wheel event stands for the reader's scroll
+    // input: a programmatic scrollTo alone is not a viewport move the page can
+    // attribute to the reader (and a re-render resets that attribution, see
+    // rerender() in preview.js).
+    evalJs(preview.get(), QStringLiteral("window.dispatchEvent(new WheelEvent('wheel')); 'ok'"));
     evalJs(preview.get(), QStringLiteral("window.scrollTo(0, 0); 'ok'"));
     QVERIFY(waitForCond(preview.get(),
                         QStringLiteral("(function () { var i = document.querySelector('#content img'); return ((i.dataset.kdx || '') === '') + '|' + (i.src.indexOf('data:image/png') === 0); })()"),
                         QStringLiteral("true|true")));
+    QVERIFY(waitForCond(preview.get(),
+                        QStringLiteral("String(parseInt(window.__kdxDecodeStats(), 10) > 0)"),
+                        QStringLiteral("true")));
 
     // Auto with a one-image document: lazy attributes only, never parked.
     Settings::self()->setImageMode(Settings::Adaptive);
@@ -699,6 +728,91 @@ void RenderFeaturesTest::parkingPreservesTheImageBox()
                         QStringLiteral("(function () { var i = %1; return i.getAttribute('width') + '|' + i.getBoundingClientRect().width; })()").arg(imgJs),
                         QStringLiteral("64|64")));
     QCOMPARE(evalJs(preview.get(), QStringLiteral("document.body.scrollHeight")).toLongLong(), heightAfterDecode);
+
+    delete doc;
+    Settings::self()->setImageMode(Settings::Adaptive); // leave the default for later tests
+}
+
+// A page reload (the maintenance recycle) starts from the markdown, which
+// carries only an image's src: a fresh page would lay the document out as if
+// every image were zero-height until it decodes, and the recycle's restored
+// scroll position would clamp to that much shorter document — the "it
+// refreshed and now I am at a different place" symptom. The host carries the
+// boxes the previous page recorded across the reload (__kdxRecycleState →
+// __setImageDims); this pins the page side of that: the boxes it reports, the
+// box a fresh page lays out with even when nothing decodes, the author's own
+// dimensions winning, and a remembered box being only provisional (the real
+// decode is authoritative).
+void RenderFeaturesTest::rememberedImageBoxesShapeAFreshReload()
+{
+    QVERIFY(m_dir.isValid());
+    // A real 64x32 PNG on disk. "far.png" deliberately stays *unloaded* by the
+    // page below: Chromium loads a lazy image immediately once it is in the
+    // memory cache, so only a src the page has never fetched can be counted on
+    // to sit there undecoded.
+    for (const char *name : {"pic.png", "far.png"}) {
+        QImage img(64, 32, QImage::Format_RGB32);
+        img.fill(QColor(30, 80, 120));
+        QVERIFY(img.save(m_dir.filePath(QLatin1String(name)), "PNG"));
+    }
+    // Tall enough that an image below it is far outside Chromium's own
+    // lazy-loading distance (so it really never decodes while we look).
+    QString filler;
+    for (int i = 0; i < 1200; ++i) {
+        filler += QStringLiteral("filler paragraph %1 above the image\n\n").arg(i);
+    }
+    const QString state = QStringLiteral("(function () { var i = document.querySelector('#content img'); "
+                                         "return i.naturalWidth + '|' + i.getAttribute('width') + '|' + i.getAttribute('height') + '|' "
+                                         "+ (document.body.scrollHeight > 1000); })()");
+
+    Settings::self()->setImageMode(Settings::Adaptive);
+    // The document lives next to the image (a relative src resolves against
+    // the document's folder, exactly like in Kate).
+    const QString docPath = m_dir.filePath(QStringLiteral("doc.md"));
+    {
+        QFile f(docPath);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        QVERIFY(f.write("# imgs\n\n![pic](pic.png)\n") > 0);
+    }
+    KTextEditor::Document *doc = KTextEditor::Editor::instance()->createDocument(nullptr);
+    QVERIFY(doc->openUrl(QUrl::fromLocalFile(docPath)));
+    auto preview = makePreview(doc);
+    preview->resize(800, 600);
+    preview->show();
+    QVERIFY(waitForPageText(preview.get(), QLatin1String("imgs")));
+    // Near the viewport: it decodes and its real box is what a capture reports.
+    QVERIFY(waitForCond(preview.get(), state, QStringLiteral("64|null|null|false")));
+    const QString recycled = evalJs(preview.get(), QStringLiteral("window.__kdxRecycleState()"));
+    QVERIFY2(recycled.contains(QStringLiteral("[64,32]")), qPrintable(recycled));
+    QVERIFY2(recycled.contains(QStringLiteral("\"y\"")), qPrintable(recycled));
+
+    // A fresh page for the same document, now long: "pic" sits at the top and
+    // decodes, while "far" is ~48000 px down and has never been fetched, so it
+    // stays undecoded. Both are shaped by a deliberately wrong remembered box,
+    // which makes clear where each size came from: a decode says 64x32.
+    evalJs(preview.get(), QStringLiteral("window.__setImageDims({\"pic.png\": [11,7], \"far.png\": [13,5]}); 'ok'"));
+    doc->setText(QStringLiteral("![pic](pic.png)\n\n%1\n![far](far.png)\n\nend of document\n").arg(filler));
+    QVERIFY(waitForPageText(preview.get(), QLatin1String("end of document")));
+
+    const QString boxOf = QStringLiteral(
+        "(function () { var i = document.images[%1]; "
+        "return i.naturalWidth + '|' + i.getAttribute('width') + '|' + i.getAttribute('height') + '|' "
+        "+ (i.dataset.kdxRemembered || 'no'); })()");
+    // The real decode is authoritative and corrects the remembered box (11x7 ->
+    // the real 64x32) — for *this* image, not for whichever one the loop
+    // happened to visit last.
+    QVERIFY(waitForCond(preview.get(), boxOf.arg(0), QStringLiteral("64|64|32|no")));
+    // Nothing ever decoded the other one, so the only size it can have is the
+    // remembered box: exactly what keeps a reload's layout intact.
+    QCOMPARE(evalJs(preview.get(), boxOf.arg(1)), QStringLiteral("0|13|5|1"));
+
+    // Author-pinned dimensions are never overwritten by a remembered box.
+    const QString pinned = evalJs(preview.get(), QStringLiteral(
+        "(function () { window.__setImageDims({\"pic.png\": [11,7]}); "
+        "window.__setMarkdown('<img src=\"pic.png\" width=\"10\" height=\"20\">'); "
+        "var i = document.querySelector('#content img'); "
+        "return i.getAttribute('width') + '|' + i.getAttribute('height'); })()"));
+    QCOMPARE(pinned, QStringLiteral("10|20"));
 
     delete doc;
     Settings::self()->setImageMode(Settings::Adaptive); // leave the default for later tests

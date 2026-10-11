@@ -22,9 +22,11 @@
 #include "previewwidget.h"
 #include "settings.h"
 
+#include <QColor>
 #include <QDeadlineTimer>
 #include <QDir>
 #include <QFile>
+#include <QImage>
 #include <QSet>
 #include <QTemporaryDir>
 #include <QTest>
@@ -136,6 +138,40 @@ long totalEngineKb()
     return total;
 }
 
+// Pids of the running renderer processes: a change means the maintenance
+// recycled the page (the renderer process died and a fresh one appeared).
+QSet<long> rendererPids()
+{
+    QSet<long> pids;
+    for (const auto &c : engineChildren()) {
+        pids.insert(c.first);
+    }
+    return pids;
+}
+
+// The offscreen test harness activates the shown window and focuses the web
+// view, while in Kate the editor holds focus and the maintenance policy
+// refuses to recycle a focused preview. Drop it again, like the other tests.
+bool dropPreviewFocus(PreviewWidget *preview)
+{
+    auto *view = preview->findChild<QWebEngineView *>();
+    if (!view) {
+        return false;
+    }
+    view->clearFocus();
+    if (view->focusProxy()) {
+        view->focusProxy()->clearFocus();
+    }
+    QDeadlineTimer deadline(5000);
+    while (!deadline.hasExpired()) {
+        if (QApplication::focusWidget() == nullptr) {
+            return true;
+        }
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+    }
+    return false;
+}
+
 // ---- page helpers (same shape as the other preview tests) ----
 
 QString evalJs(PreviewWidget *preview, const QString &code)
@@ -156,6 +192,39 @@ QString evalJs(PreviewWidget *preview, const QString &code)
     return slot->first;
 }
 
+// (count, bytes) the page reports for the reader-caused image decodes it
+// counts (see preview.js). The page's own decode set never appears here.
+QPair<int, long> decodeStats(PreviewWidget *preview)
+{
+    const QString stats = evalJs(preview, QStringLiteral("window.__kdxDecodeStats ? window.__kdxDecodeStats() : '0:0'"));
+    const int colon = stats.indexOf(QLatin1Char(':'));
+    if (colon <= 0) {
+        return {0, 0};
+    }
+    return {stats.left(colon).toInt(), stats.mid(colon + 1).toLong()};
+}
+
+// How many images the page really decoded (naturalWidth > 1: the 1x1 parking
+// placeholder and failed loads never count).
+int decodedImages(PreviewWidget *preview)
+{
+    return evalJs(preview, QStringLiteral("Array.prototype.filter.call(document.images, "
+                                          "function (i) { return i.naturalWidth > 1; }).length"))
+        .toInt();
+}
+
+bool waitForDecodedImages(PreviewWidget *preview, int count)
+{
+    QDeadlineTimer deadline(20000);
+    while (!deadline.hasExpired()) {
+        if (decodedImages(preview) >= count) {
+            return true;
+        }
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+    }
+    return false;
+}
+
 QString pageText(PreviewWidget *preview)
 {
     return evalJs(preview, QStringLiteral("document.getElementById('content').innerText"));
@@ -173,6 +242,14 @@ bool waitForText(PreviewWidget *preview, QLatin1String needle)
     return false;
 }
 
+// How many images carry a layout box (width/height attributes) right now.
+int imagesWithBox(PreviewWidget *preview)
+{
+    return evalJs(preview, QStringLiteral("Array.prototype.filter.call(document.images, "
+                                          "function (i) { return i.getAttribute('width') !== null; }).length"))
+        .toInt();
+}
+
 int imageWidth(PreviewWidget *preview)
 {
     return evalJs(preview, QStringLiteral("document.images.length ? document.images[0].naturalWidth : 0")).toInt();
@@ -188,6 +265,16 @@ bool waitForImageWidth(PreviewWidget *preview, int width)
         QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
     }
     return false;
+}
+
+// A solid w x h PNG: small on disk, large when decoded. The maintenance
+// charges a decode by its intrinsic size (capped at 8 MiB), so a document with
+// a few of these decodes more bytes than the shortened test budget.
+bool writePng(const QString &path, int w, int h)
+{
+    QImage img(w, h, QImage::Format_RGB32);
+    img.fill(QColor(120, 30, 40));
+    return img.save(path, "PNG");
 }
 
 // A text-only markdown document large enough that a render measurably dirties
@@ -214,8 +301,11 @@ private Q_SLOTS:
     void memoryStaysBoundedAcrossDocumentSwitches();
     void maintenanceRecycleFreesMemoryAndKeepsThePage();
     void imagesSurviveMaintenanceRecycle();
-    void idleOpenDocumentDoesNotRecycleInALoop();
-    void imageDecodesChargeTheRecycleBudget();
+    void idleTextChurnReclaimsInPlaceWithoutReload();
+    void imageDecodeResidueRecyclesOnlyWhenMinimized();
+    void idleImageHeavyDocumentDoesNotRecycleInALoop();
+    void maintenanceRecycleKeepsTheReaderPlaceWithImages();
+    void editorRendersAfterAScrollDoNotRechargeThePageOwnDecodes();
 };
 
 // Switching among several markdown tabs must not grow the renderer without
@@ -358,8 +448,11 @@ void RenderMemoryTest::maintenanceRecycleFreesMemoryAndKeepsThePage()
     qInfo("engine RSS before recycle %ld kB, after %ld kB", beforeKb, afterKb);
     // Two static helper processes (~140 MB) never die; the renderer itself is
     // back at its fresh-process baseline (~180 MB), so the total lands around
-    // 320 MB no matter how much dead memory was reclaimed.
-    QVERIFY2(afterKb < beforeKb - 150 * 1024 && afterKb < 400 * 1024,
+    // 320 MB no matter how much dead memory was reclaimed. (With the 64 MB
+    // default cap the churn builds less before the recycle than it did at 128,
+    // so the absolute drop is smaller — what matters is that it lands at the
+    // baseline.)
+    QVERIFY2(afterKb + 50 * 1024 < beforeKb && afterKb < 400 * 1024,
              qPrintable(QStringLiteral("recycle did not reclaim memory: %1 kB -> %2 kB").arg(beforeKb).arg(afterKb)));
 
     const double scrollAfter = evalJs(preview.get(), QStringLiteral("String(window.scrollY)")).toDouble();
@@ -414,12 +507,13 @@ void RenderMemoryTest::imagesSurviveMaintenanceRecycle()
 
 // The maintenance estimate counts the dead memory a render leaves behind when
 // it *replaces* already-rendered content. A fresh page's own first render
-// replaces nothing, so it must not be charged — otherwise any document whose
-// text charge exceeds the budget would be "due" forever and the open preview
-// would recycle itself in an endless loop (~every 7 s, measured). This pins:
-// first open of a large document stays put while idle; one edit recycles once;
-// and the fresh page after that recycle stays put again (no loop).
-void RenderMemoryTest::idleOpenDocumentDoesNotRecycleInALoop()
+// replaces nothing, so it must not be charged. This pins the maintenance's
+// central promise: churn is reclaimed *in place* by an idle forced GC
+// (window.gc, exposed by the --expose-gc flag), with no navigation — the
+// renderer process never changes. The old code discarded and reloaded the
+// renderer here, which was the intrusive self-refresh the design set out to
+// remove.
+void RenderMemoryTest::idleTextChurnReclaimsInPlaceWithoutReload()
 {
     if (!procAvailable()) {
         QSKIP("renderer RSS is read from /proc (Linux only)");
@@ -428,6 +522,7 @@ void RenderMemoryTest::idleOpenDocumentDoesNotRecycleInALoop()
     qputenv("KATEXDOWN_MEM_IDLE_MS", "800");
     qunsetenv("KATEXDOWN_MEM_OFF");
     qunsetenv("KATEXDOWN_MEM_IMG_CHARGE_MB");
+    qunsetenv("KATEXDOWN_MEM_MINIMIZED");
 
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
@@ -444,107 +539,84 @@ void RenderMemoryTest::idleOpenDocumentDoesNotRecycleInALoop()
     preview->resize(700, 500);
     preview->show();
     QVERIFY(waitForText(preview.get(), QLatin1String("loop0")));
-    // Production-like: in Kate the editor holds focus, never the preview. The
-    // offscreen test harness activates the shown window and focuses the web
-    // view (and its internal render widget), so drop the focus again — the
-    // maintenance policy refuses to recycle a focused preview.
-    {
-        auto *view = preview->findChild<QWebEngineView *>();
-        view->clearFocus();
-        if (view->focusProxy()) {
-            view->focusProxy()->clearFocus();
-        }
-        QTRY_VERIFY_WITH_TIMEOUT(QApplication::focusWidget() == nullptr, 5000);
-    }
-    const QSet<long> baselinePids = [&]() {
-        QSet<long> pids;
-        for (const auto &c : engineChildren()) {
-            pids.insert(c.first);
-        }
-        return pids;
-    }();
+    QVERIFY(dropPreviewFocus(preview.get()));
 
-    // Phase 1: an idle open preview of a large document must NOT recycle (the
-    // first render is uncharged). The old code recycled roughly every 7 s here.
-    QTest::qWait(12000);
-    const QSet<long> pids1 = [&]() {
-        QSet<long> pids;
-        for (const auto &c : engineChildren()) {
-            pids.insert(c.first);
-        }
-        return pids;
-    }();
-    QVERIFY2(pids1 == baselinePids,
-             "idle open preview of a large document recycled without any churn (loop?)");
+    // The reclamation primitive must be present, or nothing below can work.
+    QCOMPARE(evalJs(preview.get(), QStringLiteral("String(typeof window.gc)")), QStringLiteral("function"));
 
-    // Phase 2: one real edit dirties the renderer (content replacement), the
-    // budget is crossed, and the maintenance recycles exactly once...
+    const QSet<long> baselinePids = rendererPids();
+    const long baselineKb = totalEngineKb();
+
+    // Phase 1: an idle open preview of a large document reclaims nothing (the
+    // first render is uncharged) and never reloads.
+    QTest::qWait(8000);
+    QVERIFY2(rendererPids() == baselinePids, "an idle open preview reloaded itself");
+
+    // Phase 2: one real edit dirties the renderer and crosses the budget. The
+    // maintenance must reclaim it in place: no renderer process may change, and
+    // RSS must actually come down.
     doc->setText(bigText(QStringLiteral("loop1")));
     QVERIFY(waitForText(preview.get(), QLatin1String("loop1")));
-    bool recycled = false;
+    const long peakKb = totalEngineKb();
+    bool reclaimed = false;
     {
         QDeadlineTimer deadline(20000);
         while (!deadline.hasExpired()) {
-            const QSet<long> now = [&]() {
-                QSet<long> pids;
-                for (const auto &c : engineChildren()) {
-                    pids.insert(c.first);
-                }
-                return pids;
-            }();
-            if (now != baselinePids) {
-                recycled = true;
+            QVERIFY2(rendererPids() == baselinePids,
+                     "text churn reloaded the renderer instead of reclaiming in place");
+            if (totalEngineKb() + 20 * 1024 < peakKb) {
+                reclaimed = true;
                 break;
             }
             QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
         }
     }
-    QVERIFY2(recycled, "the edit did not trigger the maintenance recycle");
-    QVERIFY(waitForText(preview.get(), QLatin1String("loop1")));
+    QVERIFY2(reclaimed,
+             qPrintable(QStringLiteral("the idle forced GC did not return the churn "
+                                       "(baseline %1 kB, peak %2 kB, now %3 kB)")
+                            .arg(baselineKb).arg(peakKb).arg(totalEngineKb())));
 
-    // ...and then it stops: the recycle's own fresh render is uncharged, so no
-    // endless loop follows. The old code changed renderer pids again within a
-    // few seconds of the previous recycle.
-    const QSet<long> afterRecycle = [&]() {
-        QSet<long> pids;
-        for (const auto &c : engineChildren()) {
-            pids.insert(c.first);
-        }
-        return pids;
-    }();
-    QTest::qWait(12000);
-    const QSet<long> pids2 = [&]() {
-        QSet<long> pids;
-        for (const auto &c : engineChildren()) {
-            pids.insert(c.first);
-        }
-        return pids;
-    }();
-    QVERIFY2(pids2 == afterRecycle,
-             "the preview kept recycling after the maintenance cycle (estimate not reset?)");
+    // Phase 3: it settles — no loop of GCs or reloads follows.
+    const QSet<long> afterReclaim = rendererPids();
+    QTest::qWait(8000);
+    QVERIFY2(rendererPids() == afterReclaim, "the preview kept reloading after the reclaim");
 
     delete doc;
 }
 
-// Image decodes are invisible to the text-based estimate, yet Chromium keeps
-// a share of every decoded frame it will never return (measured ~8-10 MB per
-// photo scrolled past, in every image mode). The 1 Hz decode poll must charge
-// those decodes so an image-heavy session recycles instead of accreting
-// without bound. KATEXDOWN_MEM_IMG_CHARGE_MB makes the charge deterministic.
-void RenderMemoryTest::imageDecodesChargeTheRecycleBudget()
+// Decoded-image memory is the one part a forced GC cannot return (measured:
+// parking, window.gc and clearHttpCache barely move it), so it alone may still
+// trigger the discard+reload — and only while the preview's window is
+// minimized, because a visible page must never be reloaded. This pins both
+// halves: the reader's decodes push the estimate over the budget, the visible
+// page stays put through the idle windows (the in-place GC may run for the load
+// charge, but the renderer process never changes), and the same page recycles
+// as soon as the window is minimized. KATEXDOWN_MEM_IMG_CHARGE_MB makes the
+// charge deterministic; KATEXDOWN_MEM_MINIMIZED stands in for the minimized
+// window (the offscreen harness cannot always minimize).
+void RenderMemoryTest::imageDecodeResidueRecyclesOnlyWhenMinimized()
 {
     if (!procAvailable()) {
         QSKIP("renderer RSS is read from /proc (Linux only)");
     }
-    qputenv("KATEXDOWN_MEM_BUDGET_MB", "16"); // 4 (fixed load) + 3 x 4 (flat charge) crosses it
+    qputenv("KATEXDOWN_MEM_BUDGET_MB", "16"); // 4 x 4 MB flat charge crosses it
     qputenv("KATEXDOWN_MEM_IDLE_MS", "800");
     qputenv("KATEXDOWN_MEM_IMG_CHARGE_MB", "4");
     qunsetenv("KATEXDOWN_MEM_OFF");
+    qunsetenv("KATEXDOWN_MEM_MINIMIZED");
 
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
+    // The images sit far below the fold, after a body long enough that native
+    // lazy loading keeps them out until the reader actually scrolls there:
+    // their decodes are then unmistakably reader-caused (the page's own
+    // load-time set never counts, see preview.js).
     QString md = QStringLiteral("# imgs\n\n");
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 400; ++i) {
+        md += QStringLiteral("- filler line %1 of a long body of text\n").arg(i);
+    }
+    md += QStringLiteral("\n");
+    for (int i = 0; i < 8; ++i) {
         QFile png(dir.filePath(QStringLiteral("r%1.png").arg(i)));
         QVERIFY(png.open(QIODevice::WriteOnly));
         QCOMPARE(png.write(RedPng), RedPng.size());
@@ -565,70 +637,280 @@ void RenderMemoryTest::imageDecodesChargeTheRecycleBudget()
     preview->resize(700, 500);
     preview->show();
     QVERIFY(waitForText(preview.get(), QLatin1String("imgs")));
-    QVERIFY(waitForImageWidth(preview.get(), ImageWidth));
-    {
-        auto *view = preview->findChild<QWebEngineView *>();
-        view->clearFocus();
-        if (view->focusProxy()) {
-            view->focusProxy()->clearFocus();
-        }
-        QTRY_VERIFY_WITH_TIMEOUT(QApplication::focusWidget() == nullptr, 5000);
-    }
+    QVERIFY(dropPreviewFocus(preview.get()));
 
-    // The images at the top decode right away; wait until the page reports at
-    // least three real decodes (naturalWidth > 1, placeholders excluded).
+    // The reader browses: a wheel event marks the viewport as reader-moved and
+    // the scroll brings the far-away images into the lazy-loading zone.
+    evalJs(preview.get(), QStringLiteral("(function(){window.dispatchEvent(new WheelEvent('wheel'));"
+                                        "window.scrollTo(0, document.body.scrollHeight);return 'ok';})()"));
     {
         QDeadlineTimer deadline(15000);
         bool counted = false;
         while (!deadline.hasExpired()) {
-            const QString stats = evalJs(preview.get(), QStringLiteral("window.__kdxDecodeStats ? window.__kdxDecodeStats() : '0:0'"));
-            const int colon = stats.indexOf(QLatin1Char(':'));
-            if (colon > 0 && stats.left(colon).toInt() >= 3) {
+            if (decodeStats(preview.get()).first >= 5) {
                 counted = true;
                 break;
             }
             QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
         }
-        QVERIFY2(counted, "the page never reported the image decodes");
+        QVERIFY2(counted, "the page never charged the reader-caused image decodes");
     }
 
-    // The decode charges push the estimate over the budget; the maintenance
-    // recycles (a new renderer process appears) and the images decode again
-    // on the fresh page, with no stranded failure state.
-    const QSet<long> baselinePids = [&]() {
-        QSet<long> pids;
-        for (const auto &c : engineChildren()) {
-            pids.insert(c.first);
-        }
-        return pids;
-    }();
+    // Visible: the image residue must NOT reload the page, however many idle
+    // windows pass.
+    const QSet<long> baselinePids = rendererPids();
+    QTest::qWait(8000);
+    QVERIFY2(rendererPids() == baselinePids,
+             "an image-heavy page was reloaded while the user could see it");
+
+    // Minimized: the reload is invisible, so the discard+reload is allowed and
+    // the image memory is actually returned.
+    qputenv("KATEXDOWN_MEM_MINIMIZED", "1");
+    bool recycled = false;
     {
         QDeadlineTimer deadline(20000);
-        bool recycled = false;
         while (!deadline.hasExpired()) {
-            const QSet<long> now = [&]() {
-                QSet<long> pids;
-                for (const auto &c : engineChildren()) {
-                    pids.insert(c.first);
-                }
-                return pids;
-            }();
-            if (now != baselinePids) {
+            if (rendererPids() != baselinePids) {
                 recycled = true;
                 break;
             }
             QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
         }
-        QVERIFY2(recycled, "image decodes never triggered the maintenance recycle");
     }
+    qunsetenv("KATEXDOWN_MEM_MINIMIZED");
+    QVERIFY2(recycled, "the image residue did not recycle even while minimized");
 
     QVERIFY(waitForText(preview.get(), QLatin1String("imgs")));
-    QVERIFY(waitForImageWidth(preview.get(), ImageWidth));
+    QVERIFY(waitForDecodedImages(preview.get(), 1));
     const QString failed = evalJs(preview.get(), QStringLiteral("document.images[0].dataset.kdxFailed || 'ok'"));
     QCOMPARE(failed, QStringLiteral("ok"));
 
     delete doc;
 }
 
+
+// Opening a preview of a document with many images used to make the preview
+// reload itself over and over (and every reload also moved the reader): the
+// page's own decode set — the images it decodes by itself at load — is
+// reproduced by every fresh page, so charging it against the budget kept the
+// estimate over the budget in every generation. This pins the loop-free
+// behavior: an idle open image-heavy document stays on one renderer process.
+void RenderMemoryTest::idleImageHeavyDocumentDoesNotRecycleInALoop()
+{
+    if (!procAvailable()) {
+        QSKIP("renderer RSS is read from /proc (Linux only)");
+    }
+    qputenv("KATEXDOWN_MEM_BUDGET_MB", "16"); // three 2048x2048 decodes cross it
+    qputenv("KATEXDOWN_MEM_IDLE_MS", "800");
+    qunsetenv("KATEXDOWN_MEM_OFF");
+    qunsetenv("KATEXDOWN_MEM_IMG_CHARGE_MB");
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QString md = QStringLiteral("# gallery\n\n");
+    for (int i = 0; i < 6; ++i) {
+        QVERIFY(writePng(dir.filePath(QStringLiteral("p%1.png").arg(i)), 2048, 2048));
+        md += QStringLiteral("![photo %1](p%1.png)\n\n").arg(i);
+    }
+    const QString path = dir.filePath(QStringLiteral("doc.md"));
+    QFile f(path);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    QVERIFY(f.write(md.toUtf8()) > 0);
+    f.close();
+    KTextEditor::Document *doc = KTextEditor::Editor::instance()->createDocument(nullptr);
+    QVERIFY(doc->openUrl(QUrl::fromLocalFile(path)));
+    QTRY_VERIFY(doc->text().size() > 0);
+
+    auto preview = std::make_unique<PreviewWidget>(nullptr, nullptr, doc);
+    preview->resize(800, 600);
+    preview->show();
+    QVERIFY(waitForText(preview.get(), QLatin1String("gallery")));
+    // The document's own decodes are what this test is about: each 2048x2048
+    // decode charges the 8 MiB cap, so three of them alone would cross the
+    // budget if the page's own set were charged (it is not — see preview.js).
+    QVERIFY2(waitForDecodedImages(preview.get(), 3), "the document images never decoded");
+    QVERIFY(dropPreviewFocus(preview.get()));
+
+    const QSet<long> baselinePids = rendererPids();
+    QTest::qWait(15000);
+    QVERIFY2(decodeStats(preview.get()).first == 0,
+             "the page charged its own decode set against the maintenance budget");
+    QVERIFY2(rendererPids() == baselinePids,
+             "an idle image-heavy preview kept recycling itself (self-refresh loop)");
+
+    delete doc;
+}
+
+// A maintenance recycle must leave the reader exactly where they were. A fresh
+// page starts from the markdown source, so it knows no image geometry at all:
+// without the boxes the recycled page had recorded, the document is laid out
+// as if every image were zero-height, the restored scroll position clamps to
+// that much shorter document, and the reader lands somewhere else entirely —
+// the "it refreshed and now I am at a different place" symptom.
+void RenderMemoryTest::maintenanceRecycleKeepsTheReaderPlaceWithImages()
+{
+    qputenv("KATEXDOWN_MEM_OFF", "1"); // drive the recycle API directly, no policy ticker
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QString md = QStringLiteral("# gallery\n\n");
+    for (int i = 0; i < 8; ++i) {
+        QVERIFY(writePng(dir.filePath(QStringLiteral("p%1.png").arg(i)), 640, 480));
+        md += QStringLiteral("## marker %1\n\n![photo %1](p%1.png)\n\n").arg(i);
+        md += QStringLiteral("Body text under marker %1 so the images have room to scroll.\n\n").arg(i);
+    }
+    const QString path = dir.filePath(QStringLiteral("doc.md"));
+    QFile f(path);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    QVERIFY(f.write(md.toUtf8()) > 0);
+    f.close();
+    KTextEditor::Document *doc = KTextEditor::Editor::instance()->createDocument(nullptr);
+    QVERIFY(doc->openUrl(QUrl::fromLocalFile(path)));
+    QTRY_VERIFY(doc->text().size() > 0);
+
+    auto preview = std::make_unique<PreviewWidget>(nullptr, nullptr, doc);
+    preview->resize(700, 500);
+    preview->show();
+    QVERIFY(waitForText(preview.get(), QLatin1String("gallery")));
+    QVERIFY(waitForDecodedImages(preview.get(), 1));
+
+    // Read deep into the document: park the viewport on a marker near the end.
+    const QString marker = QStringLiteral("marker-6");
+    const QString placed = evalJs(preview.get(),
+                                  QStringLiteral("document.getElementById('%1') ? "
+                                                 "(document.getElementById('%1').scrollIntoView(), 'ok') : 'missing'")
+                                      .arg(marker));
+    QCOMPARE(placed, QStringLiteral("ok"));
+    QTest::qWait(1500); // let the images around the new position decode
+    const double scrollBefore = evalJs(preview.get(), QStringLiteral("String(window.scrollY)")).toDouble();
+    const double topBefore = evalJs(preview.get(), QStringLiteral("String(document.getElementById('%1').getBoundingClientRect().top)").arg(marker)).toDouble();
+    const int sizedBefore = imagesWithBox(preview.get());
+    QVERIFY2(scrollBefore > 2000, qPrintable(QStringLiteral("the test did not scroll deep enough: %1").arg(scrollBefore)));
+
+    QVERIFY(preview->performMemoryRecycle(true));
+    QVERIFY(waitForText(preview.get(), QLatin1String("gallery")));
+    QTest::qWait(2500); // the fresh page re-lays out and the scroll restore lands
+
+    const double scrollAfter = evalJs(preview.get(), QStringLiteral("String(window.scrollY)")).toDouble();
+    const double topAfter = evalJs(preview.get(), QStringLiteral("String(document.getElementById('%1').getBoundingClientRect().top)").arg(marker)).toDouble();
+    // The mechanism behind the restored place: the boxes the recycled page had
+    // learned survive into the fresh page (its images would otherwise be
+    // zero-height until they decode, which is what moved the reader).
+    const int sizedAfter = imagesWithBox(preview.get());
+    QVERIFY2(sizedAfter >= sizedBefore,
+             qPrintable(QStringLiteral("the fresh page lost image boxes: %1 -> %2").arg(sizedBefore).arg(sizedAfter)));
+    QVERIFY2(qAbs(scrollAfter - scrollBefore) < 8,
+             qPrintable(QStringLiteral("scroll position lost across the recycle: %1 -> %2").arg(scrollBefore).arg(scrollAfter)));
+    QVERIFY2(qAbs(topAfter - topBefore) < 8,
+             qPrintable(QStringLiteral("the reader's content moved across the recycle: viewport top %1 -> %2").arg(topBefore).arg(topAfter)));
+
+    // Exports stay plain and eager: the remembered boxes are preview machinery
+    // and must not leak into a standalone file (see __serializedHtml). The
+    // exported document is parsed back so the audit sees its images, not the
+    // preview.js source text inlined next to them.
+    const QString exportAudit = evalJs(preview.get(), QStringLiteral(
+        "(function(){var d=new DOMParser().parseFromString(window.__serializedHtml(),'text/html');"
+        "var imgs=d.querySelectorAll('img');var sized=0,real=0,machinery=0;"
+        "for(var i=0;i<imgs.length;i++){var im=imgs[i];"
+        "if(im.getAttribute('width')!==null||im.getAttribute('height')!==null)sized++;"
+        "if((im.getAttribute('src')||'').indexOf('.png')>=0)real++;"
+        "for(var j=0;j<im.attributes.length;j++)if(im.attributes[j].name.indexOf('data-kdx')===0)machinery++;}"
+        "return imgs.length+':'+sized+':'+real+':'+machinery;})()"));
+    QCOMPARE(exportAudit, QStringLiteral("8:0:8:0"));
+
+    delete doc;
+}
+
+// A decode the page performs as a consequence of *re-rendering* is not a
+// decode the reader caused: the render rebuilds the image DOM, so the images
+// around the viewport decode again — exactly the live set a fresh page
+// reproduces. The reader-moved gate behind the decode charge therefore resets
+// on every re-render. Without that reset it stayed open for the rest of the
+// page generation, so scrolling once and then editing re-charged the same
+// images on every keystroke (measured: 7 decodes after one scroll growing to
+// 42 over five edits), which kept the estimate over budget and let the
+// maintenance recycle a document nobody was touching — the residual "it
+// refreshed itself" report. This test scrolls once, edits five times, and
+// asserts the charged set stops growing and the recycler stays put.
+void RenderMemoryTest::editorRendersAfterAScrollDoNotRechargeThePageOwnDecodes()
+{
+    if (!procAvailable()) {
+        QSKIP("renderer RSS is read from /proc (Linux only)");
+    }
+    qunsetenv("KATEXDOWN_MEM_OFF");
+    qputenv("KATEXDOWN_MEM_BUDGET_MB", "64"); // above the reader's own ~35 MB of decodes
+    qputenv("KATEXDOWN_MEM_IDLE_MS", "1000");
+    qputenv("KATEXDOWN_MEM_MAX_AGE_MS", "600000"); // the idle recycle is what this pins
+    qunsetenv("KATEXDOWN_MEM_IMG_CHARGE_MB");
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QString md = QStringLiteral("# gallery\n\n");
+    for (int i = 0; i < 8; ++i) {
+        QVERIFY(writePng(dir.filePath(QStringLiteral("p%1.png").arg(i)), 1200, 900));
+        md += QStringLiteral("## marker %1\n\n![photo %1](p%1.png)\n\n").arg(i);
+        for (int j = 0; j < 20; ++j) {
+            md += QStringLiteral("filler line %1-%2 under marker %1 to give the images room.\n\n").arg(i).arg(j);
+        }
+    }
+    const QString path = dir.filePath(QStringLiteral("doc.md"));
+    QFile f(path);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    QVERIFY(f.write(md.toUtf8()) > 0);
+    f.close();
+    KTextEditor::Document *doc = KTextEditor::Editor::instance()->createDocument(nullptr);
+    QVERIFY(doc->openUrl(QUrl::fromLocalFile(path)));
+    QTRY_VERIFY(doc->text().size() > 0);
+
+    auto preview = std::make_unique<PreviewWidget>(nullptr, nullptr, doc);
+    preview->resize(800, 600);
+    preview->show();
+    QVERIFY(waitForText(preview.get(), QLatin1String("gallery")));
+    QVERIFY(waitForDecodedImages(preview.get(), 1));
+    QVERIFY(dropPreviewFocus(preview.get()));
+
+    // The reader scrolls: the wheel event opens the reader-moved gate and the
+    // images the scroll pulls in are charged (that part is by design). Wait for
+    // that decode set to settle before measuring it — lazy decoding is a bit
+    // asynchronous — so the only thing the edits could add is their own.
+    evalJs(preview.get(), QStringLiteral("window.dispatchEvent(new WheelEvent('wheel')); 'ok'"));
+    evalJs(preview.get(), QStringLiteral("window.scrollTo(0, document.body.scrollHeight); 'ok'"));
+    QVERIFY(waitForDecodedImages(preview.get(), 6));
+    int previous = -1;
+    for (int i = 0; i < 30; ++i) {
+        QTest::qWait(500);
+        const int now = decodeStats(preview.get()).first;
+        if (now == previous) {
+            break; // no reader-caused decode for 500 ms: settled
+        }
+        previous = now;
+    }
+    const QPair<int, long> afterScroll = decodeStats(preview.get());
+    QVERIFY2(afterScroll.first >= 3, qPrintable(QStringLiteral("the reader's scroll charged only %1 image decodes").arg(afterScroll.first)));
+
+    // Now the reader types: each debounced re-render rebuilds the images around
+    // the viewport. Those decodes belong to the page, not to a viewport move,
+    // so the charged set must not grow (one stray late decode is tolerated;
+    // the regression adds the whole live set, ~7 per edit, five times).
+    const QSet<long> baselinePids = rendererPids();
+    for (int i = 0; i < 5; ++i) {
+        doc->setText(doc->text() + QStringLiteral("\nedit %1\n").arg(i));
+        QTest::qWait(1200);
+    }
+    const QPair<int, long> afterEdits = decodeStats(preview.get());
+    QVERIFY2(afterEdits.first - afterScroll.first <= 1,
+             qPrintable(QStringLiteral("re-renders re-charged the page's own decodes: %1 -> %2")
+                            .arg(afterScroll.first).arg(afterEdits.first)));
+
+    // And the renderer stays put: before the gate reset, the re-charged decodes
+    // pushed the estimate past the budget and the preview recycled itself with
+    // no user action left to cause it.
+    QTest::qWait(8000);
+    QVERIFY2(rendererPids() == baselinePids, "editing after a scroll recycled the preview");
+
+    delete doc;
+}
+
 QTEST_MAIN(RenderMemoryTest)
+
 #include "rendermemorytest.moc"

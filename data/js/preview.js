@@ -7,6 +7,10 @@
 //   __setColorScheme(dark)   set color-scheme + data attribute on <html>
 //   __setImageMode(mode)     image decode policy: 'eager' | 'auto' | 'saver'
 //                            (see the image-mode section below)
+//   __setImageDims(obj)      image boxes remembered from the page this one
+//                            replaced (a maintenance recycle), keyed by src
+//   __kdxRecycleState()      JSON "scroll position + image geometry" for the
+//                            host to carry across a recycle
 //   __setCodeCopy(on)        show/hide the copy button on every code block
 //                            (see the code-copy section below)
 //   __kdxSelectionText()     the current selection as structured plain text,
@@ -31,12 +35,39 @@
   // previewwidget.cpp / idleTick): Chromium keeps a share of every image frame
   // this page ever decoded, and nothing in the page can make it give that
   // back — so the host polls __kdxDecodeStats() and charges its dead-memory
-  // estimate per decode, making an image-heavy reading session recycle (fresh
-  // renderer) like a text-heavy one. One event per real frame decode: a load
-  // with naturalWidth > 1 (the 1x1 parking placeholder never counts, failed
-  // loads have naturalWidth 0). The byte figure is a conservative upper bound
-  // of a single decode's footprint, capped so a grid of small images stays
-  // cheap instead of charging like a full-screen photo.
+  // estimate per decode, making an image-heavy *reading* session recycle (fresh
+  // renderer) like a text-heavy one.
+  //
+  // Only a decode the reader caused counts. A fresh page decodes its own set
+  // by itself — the images around the position it was loaded at (the initial
+  // load, or the scroll restore of a maintenance recycle) and, in "eager"
+  // mode, the whole document — and the page a recycle loads reproduces exactly
+  // that set. Charging it would keep the estimate over budget in every
+  // generation and recycle the open preview in an endless loop (measured: a
+  // fresh renderer every ~3 s for an idle six-photo document). So in the
+  // image-managing modes a decode counts only once the reader has moved the
+  // viewport since the current DOM was built, and in eager mode it never
+  // counts: that mode decodes everything by itself, so its decodes are not
+  // reader-caused either, and a recycle would just decode them again.
+  //
+  // "Since the current DOM was built" matters: rerender() rebuilds the image
+  // DOM (every keystroke), so the images around the viewport decode again as a
+  // consequence of the *page* re-rendering. rerender() therefore resets the
+  // gate; without that, one scroll would leave it open for the rest of the
+  // generation and every later render would re-charge its own decode set —
+  // which a fresh page reproduces anyway, so the estimate stayed over budget
+  // and the preview recycled itself on an idle, untouched document (see the
+  // pitfall in design/lazyrender.md).
+  var kdxUserMoved = false;
+  (function () {
+    var mark = function () {
+      kdxUserMoved = true;
+    };
+    var events = ["wheel", "keydown", "touchstart", "touchmove", "pointerdown", "mousedown"];
+    for (var i = 0; i < events.length; i++) {
+      window.addEventListener(events[i], mark, { capture: true, passive: true });
+    }
+  })();
   var kdxDecodeCount = 0;
   var kdxDecodeBytes = 0;
   document.addEventListener(
@@ -44,6 +75,9 @@
     function (e) {
       var t = e.target;
       if (!t || t.tagName !== "IMG" || t.naturalWidth <= 1) {
+        return;
+      }
+      if (imgMode === "eager" || !kdxUserMoved) {
         return;
       }
       kdxDecodeCount += 1;
@@ -274,6 +308,18 @@
     }
     var fm = frontMatterTable(current);
     el.innerHTML = (fm ? fm.html : "") + md.render(fm ? fm.body : current);
+    // A re-render rebuilds the image DOM, so the images it creates decode as a
+    // consequence of the *page* re-rendering — not because the reader moved the
+    // viewport. Reset the reader-moved gate here: without this, any scroll ever
+    // performed in this page generation leaves the gate open, and every later
+    // render (each keystroke) re-charges its own decode set against the
+    // maintenance budget. A fresh page reproduces exactly that set, so charging
+    // it reclaims nothing and keeps the estimate over budget — the recycle then
+    // fires at the next idle moment for a document nobody is touching (see the
+    // decode counter section). Decodes the reader causes by scrolling after
+    // this render are charged normally.
+    kdxUserMoved = false;
+    applyRememberedDims();
     rebuildOutline();
     armImages();
     decorateCodeBlocks();
@@ -375,7 +421,7 @@
   // ever happens from a real decode (parked images ignore their load events),
   // so a parked image always has a known box when it is parked.
   function recordDims(img) {
-    if (img.dataset.kdxSized || img.naturalWidth <= 0 || img.naturalHeight <= 0) {
+    if ((img.dataset.kdxSized && img.dataset.kdxRemembered !== "1") || img.naturalWidth <= 0 || img.naturalHeight <= 0) {
       return;
     }
     // Never mistake the 1x1 parking placeholder for the real image. Its load
@@ -387,11 +433,17 @@
     if (img.naturalWidth === 1 && img.naturalHeight === 1) {
       return;
     }
-    if (img.getAttribute("width") === null && img.getAttribute("height") === null) {
+    // A box that came from the remembered map (see applyRememberedDims) is a
+    // provisional guess for this page; the real decode is authoritative — the
+    // file may have changed since the box was recorded — so it overwrites the
+    // guess instead of being mistaken for author-pinned dimensions.
+    var remembered = img.dataset.kdxRemembered === "1";
+    if (remembered || (img.getAttribute("width") === null && img.getAttribute("height") === null)) {
       img.setAttribute("width", String(img.naturalWidth));
       img.setAttribute("height", String(img.naturalHeight));
       img.style.aspectRatio = img.naturalWidth + " / " + img.naturalHeight;
       img.dataset.kdxSized = "1";
+      delete img.dataset.kdxRemembered;
     } else {
       img.dataset.kdxSized = "0";
     }
@@ -430,6 +482,114 @@
     img.removeAttribute("src");
     img.setAttribute("src", real);
   }
+
+  // ---------------------------------------------------------------------
+  // Remembered image geometry (the maintenance recycle's page reload). A fresh
+  // page knows nothing about image sizes — the markdown only carries the src —
+  // so it lays the document out as if every image were zero-height. That is
+  // why a recycle (a full reload) used to move the reader: the scroll position
+  // is restored right after the fresh load, when the document is still much
+  // shorter than the one it replaced, so the restore clamps to that shorter
+  // height and the reader lands somewhere else (and then the layout grows
+  // under them as the images decode). The host therefore captures the boxes
+  // this page recorded (__kdxRecycleState) before discarding it and pushes
+  // them back into the fresh page (__setImageDims); the fresh page lays out
+  // exactly like the page it replaced, so the restore lands on the same
+  // content. Author-pinned dimensions are never overwritten, and a set of
+  // remembered dims is only a provisional box: the image's first real decode
+  // on the fresh page corrects it (see recordDims).
+  var rememberedDims = {};
+
+  // The boxes known for this page, keyed by the image's real src (the parking
+  // placeholder is never a key). srcset images are native-lazy only and stay
+  // out of the machinery, so they are not remembered either.
+  function imageGeometry() {
+    var out = {};
+    var imgs = document.querySelectorAll("#content img");
+    for (var i = 0; i < imgs.length; i++) {
+      var img = imgs[i];
+      if (img.dataset.kdxSkip) {
+        continue;
+      }
+      var src = img.dataset.kdx || img.getAttribute("src");
+      if (!src || src === IMG_PLACEHOLDER) {
+        continue;
+      }
+      // A real decode is the best source (eager mode never records boxes, and
+      // it does not matter: every image there decoded by itself).
+      if (img.naturalWidth > 1 && img.naturalHeight > 1) {
+        out[src] = [img.naturalWidth, img.naturalHeight];
+        continue;
+      }
+      // A parked image is on the placeholder, so only its recorded box is
+      // left. "kdxSized 1" means the box was recorded from a real decode.
+      if (img.dataset.kdxSized === "1") {
+        var w = parseInt(img.getAttribute("width"), 10);
+        var h = parseInt(img.getAttribute("height"), 10);
+        if (w > 1 && h > 1) {
+          out[src] = [w, h];
+        }
+      }
+    }
+    return out;
+  }
+
+  // Apply the remembered boxes to the freshly rendered DOM, before the layout
+  // (and with it the restored scroll position) is decided.
+  function applyRememberedDims() {
+    var content = document.getElementById("content");
+    if (!content) {
+      return;
+    }
+    var imgs = content.querySelectorAll("img");
+    for (var i = 0; i < imgs.length; i++) {
+      var img = imgs[i];
+      if (img.dataset.kdxSkip || img.hasAttribute("width") || img.hasAttribute("height")) {
+        continue; // native-lazy only, or the author's own dimensions
+      }
+      var src = img.getAttribute("src");
+      var d = src ? rememberedDims[src] : null;
+      if (!d || !(d[0] > 1) || !(d[1] > 1)) {
+        continue;
+      }
+      img.setAttribute("width", String(d[0]));
+      img.setAttribute("height", String(d[1]));
+      img.style.aspectRatio = d[0] + " / " + d[1];
+      img.dataset.kdxSized = "1";
+      img.dataset.kdxRemembered = "1";
+      validateRememberedBox(img);
+    }
+  }
+
+  // A remembered box is provisional: when the real resource decodes, the decode
+  // is authoritative (the file may have changed since the box was recorded).
+  // Managed images already validate through armImages/onImgLoad; this covers an
+  // unmanaged one (few images, auto mode) as well. A parked image ignores the
+  // placeholder's own 1x1 decode and keeps waiting for the real one. (A named
+  // function per image, not a loop closure: the listener outlives the loop.)
+  function validateRememberedBox(img) {
+    img.addEventListener("load", function validateRemembered() {
+      if (img.dataset.kdx) {
+        return;
+      }
+      img.removeEventListener("load", validateRemembered);
+      recordDims(img);
+    });
+  }
+
+  // Host hook: the boxes this page knows, for the page that will replace it.
+  window.__setImageDims = function (dims) {
+    rememberedDims = dims && typeof dims === "object" ? dims : {};
+  };
+
+  // Host hook: everything the host must know before it discards this page for
+  // a same-document recycle — where the reader was, and the geometry the fresh
+  // page has to lay out with. Both are captured in one call on purpose: they
+  // belong to one moment, and a runJavaScript callback cannot survive the
+  // discard.
+  window.__kdxRecycleState = function () {
+    return JSON.stringify({ y: window.scrollY, dims: imageGeometry() });
+  };
 
   function imgInZone(img) {
     var r = img.getBoundingClientRect();
@@ -600,6 +760,7 @@
       img.removeAttribute("data-kdx-srcset");
       img.removeAttribute("data-kdx-skip");
       img.removeAttribute("data-kdx-sized");
+      img.removeAttribute("data-kdx-remembered");
       img.removeAttribute("data-kdx-failed");
       img.removeAttribute("data-kdx-listen");
     }

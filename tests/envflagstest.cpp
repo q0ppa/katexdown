@@ -1,13 +1,15 @@
 // Unit tests for the Chromium-flag plumbing (src/kdxchromiumflags.h) that
-// carries the configured V8 heap cap into QTWEBENGINE_CHROMIUM_FLAGS. Pure
+// carries the configured V8 heap cap and the --expose-gc flag (the maintenance's
+// in-place reclamation primitive) into QTWEBENGINE_CHROMIUM_FLAGS. Pure
 // environment logic — deliberately no QtWebEngine anywhere in this binary, so
 // it runs instantly and cannot perturb engine state.
 //
-// Pins: the cap is appended when the env is empty or carries non-js-flags;
-// an explicit --js-flags in the env always wins (a second --js-flags switch
-// would be silently dropped by Chromium); cap <= 0 and KATEXDOWN_V8_CAP_MB=0
-// mean "off" and must leave the env untouched; the env override wins over the
-// configured value and an unparsable override falls back to it.
+// Pins: the flags are appended when the env is empty or carries non-js-flags;
+// --expose-gc is included even when the cap is off; an explicit --js-flags in
+// the env always wins (a second --js-flags switch would be silently dropped by
+// Chromium); KATEXDOWN_V8_CAP_MB=0 disables only the cap, not --expose-gc; the
+// env override wins over the configured value and an unparsable override falls
+// back to it.
 
 #include "kdxchromiumflags.h"
 
@@ -20,8 +22,8 @@ class EnvFlagsTest : public QObject
 private Q_SLOTS:
     void appliesWhenEnvEmpty();
     void appendsToExistingNonJsFlags();
+    void offCapStillExposesGc();
     void leavesExplicitJsFlagsAlone();
-    void offCapLeavesEnvAlone();
     void envOverrideWins();
     void invalidEnvOverrideFallsBack();
 };
@@ -34,16 +36,29 @@ static QByteArray env()
 void EnvFlagsTest::appliesWhenEnvEmpty()
 {
     qunsetenv("QTWEBENGINE_CHROMIUM_FLAGS");
-    kdxchromiumflags::applyV8HeapCap(128);
-    QCOMPARE(env(), QByteArray("--js-flags=--max-old-space-size=128"));
+    kdxchromiumflags::applyJsFlags(128);
+    QCOMPARE(env(), QByteArray("--js-flags=--max-old-space-size=128,--expose-gc"));
     qunsetenv("QTWEBENGINE_CHROMIUM_FLAGS");
 }
 
 void EnvFlagsTest::appendsToExistingNonJsFlags()
 {
     qputenv("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu --no-sandbox");
-    kdxchromiumflags::applyV8HeapCap(128);
-    QCOMPARE(env(), QByteArray("--disable-gpu --no-sandbox --js-flags=--max-old-space-size=128"));
+    kdxchromiumflags::applyJsFlags(128);
+    QCOMPARE(env(), QByteArray("--disable-gpu --no-sandbox --js-flags=--max-old-space-size=128,--expose-gc"));
+    qunsetenv("QTWEBENGINE_CHROMIUM_FLAGS");
+}
+
+void EnvFlagsTest::offCapStillExposesGc()
+{
+    // 0 (the setting's "off") drops only the V8 cap. --expose-gc is the
+    // maintenance's reclamation primitive, so it is merged regardless.
+    qunsetenv("QTWEBENGINE_CHROMIUM_FLAGS");
+    kdxchromiumflags::applyJsFlags(0);
+    QCOMPARE(env(), QByteArray("--js-flags=--expose-gc"));
+    qputenv("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu");
+    kdxchromiumflags::applyJsFlags(-1);
+    QCOMPARE(env(), QByteArray("--disable-gpu --js-flags=--expose-gc"));
     qunsetenv("QTWEBENGINE_CHROMIUM_FLAGS");
 }
 
@@ -51,23 +66,14 @@ void EnvFlagsTest::leavesExplicitJsFlagsAlone()
 {
     // Any --js-flags means the user owns V8 tuning; appending a second
     // --js-flags switch would be dropped by Chromium (first one wins), so the
-    // helper must not pretend the cap is active.
+    // helper must not pretend the cap or --expose-gc is active.
     qputenv("QTWEBENGINE_CHROMIUM_FLAGS", "--js-flags=--expose-gc");
-    kdxchromiumflags::applyV8HeapCap(128);
+    kdxchromiumflags::applyJsFlags(128);
     QCOMPARE(env(), QByteArray("--js-flags=--expose-gc"));
     // Same for a user-set cap: theirs stands, ours never doubles it.
     qputenv("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu --js-flags=--max-old-space-size=512");
-    kdxchromiumflags::applyV8HeapCap(128);
+    kdxchromiumflags::applyJsFlags(128);
     QCOMPARE(env(), QByteArray("--disable-gpu --js-flags=--max-old-space-size=512"));
-    qunsetenv("QTWEBENGINE_CHROMIUM_FLAGS");
-}
-
-void EnvFlagsTest::offCapLeavesEnvAlone()
-{
-    qputenv("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu");
-    kdxchromiumflags::applyV8HeapCap(0);
-    kdxchromiumflags::applyV8HeapCap(-1);
-    QCOMPARE(env(), QByteArray("--disable-gpu"));
     qunsetenv("QTWEBENGINE_CHROMIUM_FLAGS");
 }
 

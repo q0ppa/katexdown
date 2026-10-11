@@ -155,6 +155,8 @@ real src, decoded  ──leave keep zone──▶  parked (src = 1x1 placeholder
   viewport, their box appears once, and *from that decode on* they join the
   parking machinery like everyone else. The document height therefore only
   ever grows once per image, off-screen — never shrinks, never re-collapses.
+  (A box *remembered* from a previous page of the same document counts as
+  known — see Section 6 — so it may be parked, box intact.)
 - Images with `srcset` are left to native lazy loading only (`data-kdx-skip`),
   and images that genuinely failed (`data-kdx-failed`) are never parked.
 - **Export is unaffected by all of this:** `__serializedHtml()` serializes a
@@ -163,108 +165,149 @@ real src, decoded  ──leave keep zone──▶  parked (src = 1x1 placeholder
   for why the live page must not be serialized directly).
 
 
-### 4. Renderer-memory maintenance (`previewwidget.cpp` idleTick / performMemoryRecycle)
+### 4. Renderer-memory maintenance (`previewwidget.cpp` idleTick / reclaimInPlace / reclaimAtIdle)
 
 The levers above decide what enters a renderer. This one bounds what a
-long-lived renderer *retains* — because nothing inside Chromium gives it back.
-Measurements that shaped the design (offscreen test environment, text-only
-documents):
+long-lived renderer *retains*. Measurements that shaped the design (offscreen
+test environment):
 
-- A renderer that stays alive never returns dead memory: switching among three
-  ~100 kB documents grew one renderer by ~70 MB **per switch**, linearly, to
-  2.2 GB in 30 switches, and 48 full re-renders of one document grew it to
-  2.75 GB with no plateau and no self-triggered GC. (Pure JS allocation churn
-  barely leaks — the growth comes from full-document re-rendering.)
+- A renderer that stays alive never collects, by itself, the dead DOM/V8 memory
+  a full-document re-render strands: switching among three ~100 kB documents
+  grew one renderer by ~70 MB **per switch**, linearly, to 2.2 GB in 30
+  switches, and 48 full re-renders of one document grew it to 2.75 GB with no
+  plateau and no self-triggered GC.
+- An explicit forced GC returns that memory **in place**: on the real preview,
+  `window.gc()` took a 90 kB text document from 1053 MB back to 458 MB
+  (400–600 MB reclaimed; ~40–150 ms for text, up to ~640 ms on a 660 MB KaTeX
+  document), repeatably, with no navigation. With a 32 MB cap + GC the total
+  engine RSS returns to the *loaded* footprint (~319 MB, helper processes
+  included) — the same steady state a discard+reload converges to after it
+  re-renders the document, minus the reload.
+- Decoded-image memory is the one part a GC does **not** return: parking
+  (`src = 1×1 placeholder`), `window.gc()` and
+  `QWebEngineProfile::clearHttpCache()` barely move it. Only process death does.
 - QtWebEngine refuses to freeze or discard a page it considers **visible**
-  ("page is visible"), and a frozen page only runs Chromium's memory purge
-  when it was *never shown* — so neither freeze nor discard can reclaim an
-  open preview's renderer.
-- Discard is the reliable primitive: when the page is told it is hidden
-  (`QWebEnginePage::setVisible(false)`), Qt allows `Discarded`, the renderer
-  process **exits and returns every byte**, and a subsequent load starts a
-  fresh process at the ~180 MB baseline.
+  ("page is visible"), and a frozen page only runs Chromium's memory purge when
+  it was *never shown* — so neither freeze nor discard can reclaim a visible
+  page's renderer.
 
-The maintenance therefore **recycles the renderer** (lets it die and loads a
-fresh page from the mirrored document state) instead of trying to purge it.
-Two trigger points, both invisible by construction:
+The maintenance therefore has two primitives, and **neither ever reloads a page
+the user can see**:
 
-- **At a document switch** (`attachDocument`): a switch already reloads the
-  page, so replacing that reload with discard + fresh load costs the user
-  nothing extra — the switch just lands on a clean renderer. This is what
-  bounds tab-switching sessions.
-- **At an idle moment on the same document** (`idleTick`, once the estimated
-  dead memory passes the budget and the page has been quiet for a while, not
-  focused, visible): the page is recycled in place with the scroll position
-  restored after the fresh load, so a paused reader sees nothing change.
+- **In place (the primary): a forced GC.** `--expose-gc` is merged into the
+  engine's `--js-flags` (see the JS heap guard below), exposing `window.gc()`.
+  At an idle moment over budget, `reclaimInPlace()` calls it; the estimate
+  drops to the image charge (what a GC cannot return). No navigation, no scroll
+  change, no flicker.
+- **Discard+reload (the image residue only, and only when invisible).**
+  `performMemoryRecycle()` hides the page, discards it (the renderer process
+  exits and returns every byte) and loads a fresh page from the mirrored
+  document state, restoring the reader's scroll position and image geometry
+  (Section 6). `reclaimAtIdle()` uses it only when the decoded-image charge
+  alone is over budget **and** the preview's top-level window is minimized
+  (`previewWindowMinimized()`), i.e. the user cannot see the page.
+- **At a document switch**, the same discard+reload is free: the switch already
+  reloads the page, so replacing that reload with a recycle costs the user
+  nothing extra. This is what bounds tab-switching sessions.
 
 The trigger is an **estimate**, not an RSS measurement (portable): every full
 page load adds a fixed cost (re-executing the inlined engines), every
 full-document markdown push that *replaces already-rendered content* adds
-`text size × factor`, and every real image decode adds a charge (see below),
-with the factors calibrated from the measurements above (defaults in
-`readMemTuning()`; tunable per process via `KATEXDOWN_MEM_BUDGET_MB`,
+`text size × factor`, and every image decode the reader caused adds a charge
+(see below), with the factors calibrated from the measurements above (defaults
+in `readMemTuning()`; tunable per process via `KATEXDOWN_MEM_BUDGET_MB`,
 `KATEXDOWN_MEM_IDLE_MS`, `KATEXDOWN_MEM_MAX_AGE_MS`, `KATEXDOWN_MEM_OFF=1`, and
-for tests `KATEXDOWN_MEM_IMG_CHARGE_MB`). The estimate over- rather than
-under-counts, so real memory stays under the budget even where the real leak
-ratio is higher than measured. A discard (or a closed-panel freeze, which
-*is* a purge) resets the estimate — that is the "since the last purge" book-
-keeping. A 5 s safety timer aborts any recycle that does not complete, so the
-preview can never stay hidden.
+for tests `KATEXDOWN_MEM_IMG_CHARGE_MB` and `KATEXDOWN_MEM_MINIMIZED`). The
+estimate over- rather than under-counts, so real memory stays under the budget
+even where the real leak ratio is higher than measured. A discard (or a
+closed-panel freeze, which *is* a purge) resets the estimate; a forced GC
+resets its reclaimable part and keeps `m_imgCharge` — that is the "since the
+last reclaim" bookkeeping. A 5 s safety timer aborts any recycle that does not
+complete, so the preview can never stay hidden.
 
 **A page's first render is not charged.** The dead memory the estimate counts
 is what a render leaves behind when it *replaces* content that was already on
-the page. The very first render of a page — first open, or the fresh page of
-a maintenance recycle — replaces nothing, so charging it text × factor would
-keep any document whose text charge exceeds the budget permanently "due";
-the open preview would then recycle itself in an endless loop (measured:
-a fresh renderer process every ~7 s for an idle 1 MB text document).
+the page. The very first render of a page — first open, or the fresh page of a
+recycle — replaces nothing, so charging it text × factor would keep any
+document whose text charge exceeds the budget permanently "due"; the open
+preview would then reclaim on every idle window (measured: a fresh renderer
+process every ~7 s for an idle 1 MB text document before this gate existed).
 `m_renderedOnce` (reset when a discard kills the renderer) is the gate.
 
-**Image decodes are charged too.** Scrolling past an image decodes it (at
-viewport quality) and the renderer keeps a share of that decoded frame it
-will never return on its own — measured at ~8-10 MB per photo scrolled past,
-in *every* image mode, sticky over 50+ s of idle, invisible to a text-only
-estimate because it arrives without any render or navigation. The page
-counts every real decode (`window.__kdxDecodeStats` in preview.js — a load
-with `naturalWidth > 1`, so the 1x1 parking placeholder and failed loads
-excluded) and the host polls it once per second while an image-bearing
-document is open (`idleTick`/`handleDecodeStats`, gated by a cheap `![`/`<img`
-text scan). Each new decode is charged min(intrinsic bytes, 8 MiB) — capped
-so a grid of small images stays cheap — or a flat amount when
-`KATEXDOWN_MEM_IMG_CHARGE_MB` is set. A photo-browsing session therefore
-recycles at the next quiet moment instead of accreting without bound.
+**Image decodes are charged too — but only the ones the reader caused.**
+Scrolling past an image decodes it (at viewport quality) and the renderer keeps
+a share of that decoded frame it will never return on its own — sticky over
+50+ s of idle, invisible to a text-only estimate because it arrives without any
+render or navigation. The page counts those decodes
+(`window.__kdxDecodeStats` in preview.js — a load with `naturalWidth > 1`, so
+the 1×1 parking placeholder and failed loads excluded) and the host polls it
+once per second while an image-bearing document is open
+(`idleTick`/`handleDecodeStats`, gated by a cheap `![`/`<img` text scan). Each
+new decode is charged min(intrinsic bytes, 8 MiB) — capped so a grid of small
+images stays cheap — or a flat amount when `KATEXDOWN_MEM_IMG_CHARGE_MB` is
+set. The charge accumulates in `m_imgCharge` as well as `m_memEstimate`,
+because a forced GC cannot return decoded images; only a discard can.
 
-### JS heap guard (Settings::V8HeapCapMb, `src/kdxchromiumflags.h`)
+The page counts a decode only once the reader has moved the viewport since the
+current DOM was built, and in `eager` mode it never counts. What a page decodes
+*by itself* — the images around the position it was loaded at, the whole
+document in `eager` mode, and the images a re-render rebuilds around the
+viewport — is exactly the live set the next page reproduces, so charging it
+reclaims nothing and keeps the estimate over budget forever (the self-refresh
+loop, see Pitfalls). Decodes a reader's scrolling pulls in are the ones a
+reclaim can actually take back. "Since the current DOM was built" is why
+`rerender()` resets the gate: a keystroke rebuilds the image DOM, so its
+decodes are page-caused even though the reader scrolled earlier in the same
+page generation.
 
-The recycle bounds a renderer's *lifetime*, not its peaks: between recycles a
-single renderer still grows by tens to hundreds of MB per full re-render (the
-growth is V8-retained garbage — every `__setMarkdown` strands the replaced DOM
-tree in the old space, and Chromium never major-GCs on its own, so nothing is
-collected until pressure or process death). The JS heap guard caps that old
-space (`--js-flags=--max-old-space-size=N`) so V8 itself collects under
-pressure: a session that keeps re-rendering a document plateaus instead of
-climbing until the recycle fires.
+**A reclaim never runs in a loop on what it cannot reclaim.** After
+`reclaimInPlace()` the estimate is exactly `m_imgCharge`, so if only images
+keep it over budget, `reclaimAtIdle()` does **not** GC again (no reclaimable
+charge) and does not reload (the page is visible): it simply does nothing until
+the reader minimizes the window, at which point one discard+reload returns the
+images. This is what makes an image-heavy reading session safe without a
+self-refresh.
 
-- **Delivery is the constraint.** QtWebEngine has no runtime API for flags;
-it reads `QTWEBENGINE_CHROMIUM_FLAGS` once, when the engine starts (first
-profile/page/view — effectively the first renderer process). The cap is
-merged into that env var before the engine can start, from two idempotent
-points: the plugin constructor (plugins load before kate creates any tool
-view) and the `PreviewWidget` constructor, *before* it creates its own
-profile (covers the tests, which drive the widget without the plugin, and the
-lazy modes where the engine starts on first open). Best effort: if another
-plugin already started the engine, the flag arrives too late.
+### JS heap guard (`Settings::V8HeapCapMb` + `--expose-gc`, `src/kdxchromiumflags.h`)
+
+Two renderer JS flags travel together in one `--js-flags` switch (Chromium
+reads only the first such switch, so they must be comma-joined):
+
+- `--expose-gc` — always, even when the cap is off. It exposes `window.gc()`,
+  the maintenance's in-place reclamation primitive (Section 4).
+- `--max-old-space-size=N` — when the configured cap is > 0. It bounds the V8
+  old space **between** those GCs so the growth per render stays small; it
+  never returns the freed pages itself. Cap and GC are complementary: cap =
+  peak between collections, GC = return to floor.
+
+Default cap **64 MB** (measured sweet spot): on a heavy KaTeX document it
+renders in ~2.9–3.2 s versus ~2.45 s uncapped, but peaks ~710 MB instead of
+~1.44 GB; with the idle GC the text floor is ~320–365 MB depending on cap, and
+a 32 MB cap reaches the loaded baseline (~319 MB). The cap is invisible while a
+document's per-render working set stays under it and only costs GC time when it
+does not. "Off" (0) drops the cap; the forced GC still runs.
+
+- **Delivery is the constraint.** QtWebEngine has no runtime API for flags; it
+  reads `QTWEBENGINE_CHROMIUM_FLAGS` once, when the engine starts (first
+  profile/page/view — effectively the first renderer process). The flags are
+  merged into that env var before the engine can start, from two idempotent
+  points: the plugin constructor (plugins load before kate creates any tool
+  view) and the `PreviewWidget` constructor, *before* it creates its own
+  profile (covers the tests, which drive the widget without the plugin, and the
+  lazy modes where the engine starts on first open). Best effort: if another
+  plugin already started the engine, the flags arrive too late.
 - **Explicit `--js-flags` in the user's env wins.** Chromium reads the first
-`--js-flags` switch, so appending a second one would be silently dropped and
-the setting would look active without being. `applyV8HeapCap()` therefore
-refuses to touch the env when it already contains `--js-flags`; 0 (the
-setting's "off") leaves the env alone entirely.
+  `--js-flags` switch, so appending a second one would be silently dropped and
+  the flags would look active without being. `applyJsFlags()` therefore refuses
+  to touch the env when it already contains `--js-flags`. Then `window.gc` may
+  be missing: `reclaimInPlace()` detects that once (`m_gcUnavailable`) and
+  disables itself, and no visible page is ever reloaded as a fallback.
 - **Reading happens once per process:** a setting change needs a Kate restart
-(config page says so), unless the engine has not started yet.
+  (config page says so), unless the engine has not started yet.
 
-Measured behavior (Qt 6.11 / Chromium 140, offscreen probe, renderer RSS
-alone — the two static ~88 MB helper processes are constant and excluded;
-fresh renderer baseline ~172 MB):
+Measured behavior of the cap alone (Qt 6.11 / Chromium 140, offscreen probe,
+renderer RSS alone — the two static ~88 MB helper processes are constant and
+excluded; fresh renderer baseline ~172 MB):
 
 | Document | No cap | Cap 128 | Cap 64 |
 |---|---|---|---|
@@ -272,23 +315,23 @@ fresh renderer baseline ~172 MB):
 | stress (90 kB, 700 math), 8 re-renders | 172→2231 MB, +256 MB/render; ~0.8 s/render | plateau ~600 MB; ~3.0 s/render | plateau ~570 MB; ~3.0 s/render |
 | text-only 90 kB churn | unbounded until recycle | ≈ no cap (see below) | — |
 
-Two measured consequences shape the rules above:
+The cap alone never hands the freed pages back (it plateaus); the idle forced
+GC is what returns RSS to the loaded footprint. Two measured consequences shape
+the rules above:
 
-- **The guard is invisible while a render fits under the cap and costs GC
-time when it does not.** A document whose per-render working set exceeds the
-cap makes V8 collect *during* the build — the stress row above goes from
-0.8 s to ~3.0 s per render. That is the trade-off the configurable setting
-(and "off") exists for; the plateau, not the render time, is what a low cap
-buys on such documents.
-- **The guard is not a substitute for the recycle.** On text-only churn of
-the ~100 kB documents the maintenance was calibrated on, a 128 MB cap changes
-almost nothing (that growth is not old-space-dominated), and nothing but
-process death reclaims decoded images. Recycle stays the primary bound; a
-binding cap merely makes real growth smaller than the estimate, so the
-recycle may fire a little early — harmless, never late.
+- **A low cap costs render time when it binds.** A document whose per-render
+  working set exceeds the cap makes V8 collect *during* the build — the stress
+  row above goes from 0.8 s to ~3.0 s per render. That is the trade-off the
+  configurable setting (and "off") exists for.
+- **The cap is not a substitute for reclamation.** On the text-only churn the
+  maintenance was calibrated on, a 128 MB cap changes almost nothing (that
+  growth is not old-space-dominated), and neither the cap nor a GC returns
+  decoded images — those need the discard. A binding cap merely makes real
+  growth smaller than the estimate, so a reclaim may fire a little early —
+  harmless, never late.
 - `--enable-features=PartitionAllocMemoryReclaimer` and
-`PartitionAllocLazyCommit` measured no effect on this workload in Chromium
-140 (already the defaults there); do not resurrect them without re-measuring.
+  `PartitionAllocLazyCommit` measured no effect on this workload in Chromium
+  140 (already the defaults there); do not resurrect them without re-measuring.
 
 ### 5. Reloadless document switches (`attachDocument` fast path)
 
@@ -303,6 +346,52 @@ than before *and* dirties the renderer less between recycles. Any folder or
 engine change, a loading page, or a closed panel falls back to the full load.
 A doc that outgrows the page's engine set still triggers the one-time rebuild
 (Invariant 4).
+
+### 6. Remembered image geometry (`__kdxRecycleState`/`__setImageDims`, preview.js)
+
+A page reload is a new document built from the markdown, and the markdown
+carries only an image's `src`: the fresh page knows no image sizes, so it lays
+the document out as if every image were zero-height until each one decodes.
+That is fine when the reader arrives at the top, and wrong for the one reload
+that is supposed to be invisible: the maintenance recycle restores the reader's
+scroll position immediately after the fresh render, when the document is still
+that much shorter, so `scrollTo` clamps to the collapsed height and the reader
+lands somewhere else entirely (measured: 640 px off on a six-image document,
+before the layout even finished growing back).
+
+The host therefore carries the geometry across the reload with the scroll
+position:
+
+- Before discarding the page, the same-document recycle asks it for one JSON
+  snapshot — `window.__kdxRecycleState()` returns `{y: scrollY, dims: {...}}`.
+  One call on purpose: a `runJavaScript` callback cannot survive the discard,
+  so everything the fresh page needs must be captured before it, and both
+  values belong to the same moment (a position is only meaningful against the
+  layout it was measured in).
+- `dims` maps an image's real `src` to `[width, height]`, taken from a real
+  decode (`naturalWidth > 1`, which also covers `eager` mode, where no boxes
+  are ever recorded) or from the recorded box of a parked image. srcset images
+  stay out (they are native-lazy only) and the 1×1 parking placeholder is never
+  a key.
+- The box set is **per document**: `attachDocument` clears it, and so does a
+  URL change (save-as/rename), so the same relative image name in another
+  folder can never be sized by the wrong picture.
+- `loadFinished` pushes it into the fresh page (`applyImageDims` →
+  `__setImageDims`) *before* the first render, so `rerender()` gives every
+  image its box (`width`/`height` + inline `aspect-ratio`, marker
+  `data-kdx-remembered`) before the layout — and with it the restored scroll
+  position — is decided.
+- A remembered box never overwrites author-pinned dimensions, and it is only
+  provisional: the image's first real decode on the fresh page corrects it
+  (`recordDims` treats `data-kdx-remembered` as "ours, re-record", so a file
+  that changed on disk wins over the memory), and it is stripped from exports
+  like any other machinery box (`data-kdx-sized="1"`).
+
+Because the boxes exist from the first frame, the recycle's scroll restore
+lands on exactly the content the reader was looking at, and nothing shifts as
+images decode afterwards. It also means the fresh page parks far-off images
+right away (their box is known), which is friendlier to memory than
+re-decoding them.
 
 ## Invariants (rules a change must not break)
 
@@ -327,24 +416,39 @@ A doc that outgrows the page's engine set still triggers the one-time rebuild
 6. **The closed panel costs no CPU.** Kept modes freeze on close; only a
    frozen, long-closed page may be discarded. Opening returns the page to
    Active and lets the load pipeline refresh it.
-7. **Reclaiming an open preview's renderer means letting the process die.** Qt
-   refuses `Frozen`/`Discarded` on a visible page; freeze purges only
-   never-shown pages. The maintenance recycle therefore hides the page
-   (`setVisible(false)`), discards it, and loads a fresh page from the
-   mirrored document state — every recycle is a full discard-and-reload, and
-   nothing else may be substituted for it.
-8. **A recycle is a reload, so it must obey the load pipeline invariants.** It
-   only starts when the page is loaded/active and the panel is open; the fresh
-   load clears and re-sets `m_loaded` through the normal `loadFinished`
-   pipeline, which re-applies theme, image mode, content and outline from the
-   mirrored state (`m_text`/`m_doc`). `render()` and friends never push into a
-   page that is mid-recycle; they wait for the pipeline like after any load.
-9. **A recycle is only ever user-invisible.** It happens either as part of a
-   document switch (which reloads anyway) or after the preview has been quiet
-   (no text change, input or pending work) for the idle window, is visible,
-   and is not focused; the same-document variant restores the scroll position
-   after the fresh load. A safety timer aborts any recycle that gets stuck, so
-   the preview can never remain hidden.
+7. **Reclaim in place first; discard only for what a GC cannot return — and
+   never a visible page.** A forced GC (`window.gc`, exposed by the merged
+   `--expose-gc`) returns the dead DOM/V8 memory a re-render stranded without
+   touching the page: that is the primary reclaim. Decoded-image memory is the
+   one part it cannot return, so the maintenance may fall back to the
+   discard+reload (`performMemoryRecycle`) only for the image charge and only
+   while the preview's window is minimized (`previewWindowMinimized()`), i.e.
+   invisible; a page the user can see is never reloaded, and when `window.gc`
+   is unavailable (the user's own `--js-flags` won the merge) the maintenance
+   does nothing rather than reload. Discard is the only wholesale renderer
+   release QtWebEngine allows: it hides the page (`setVisible(false)`), which
+   makes the `Discarded` transition legal, and then loads a fresh page from
+   the mirrored document state. The retry for a refused discard only ever
+   re-discards a page whose discard never happened (`m_recycleDiscarded`):
+   once the discard stuck, the page in front of the ticker is the recycle's
+   *fresh* page, and discarding that one kills the load the cycle is waiting
+   for (see Pitfalls).
+8. **A discard+reload is a reload, so it must obey the load pipeline
+   invariants.** It only starts when the page is loaded/active and the panel
+   is open; the fresh load clears and re-sets `m_loaded` through the normal
+   `loadFinished` pipeline, which re-applies theme, image mode, content and
+   outline from the mirrored state (`m_text`/`m_doc`). `render()` and friends
+   never push into a page that is mid-recycle; they wait for the pipeline like
+   after any load.
+9. **A reclaim is only ever user-invisible.** The in-place GC runs only after
+   the preview has been quiet (no text change, input or pending work) for the
+   idle window, is visible, and is not focused; a charged image decode counts
+   as activity, so a scrolling reader is neither GC'd nor reloaded mid-scroll.
+   The image-residue discard additionally requires the preview's window to be
+   minimized; it restores the scroll position *and the image geometry* that
+   position was measured against (Section 6), so the reload lands on the same
+   content when the reader returns. A safety timer aborts any recycle that
+   gets stuck, so the preview can never remain hidden.
 10. **A page only ever re-renders a same-folder switch in place** (Section 5)
     when it is loaded, the panel is open, nothing is pending, and the new text
     needs no engine the page lacks; any other switch is a full load.
@@ -358,38 +462,109 @@ A doc that outgrows the page's engine set still triggers the one-time rebuild
     that replace already-rendered content leave the dead memory the estimate
     counts; charging a fresh page's own first render (first open, or a
     recycle's fresh load) would keep any large document permanently "due" and
-    recycle the open preview in an endless loop. `m_renderedOnce` is the gate,
-    reset together with the estimate when a discard kills the renderer.
-13. **Every real image decode is charged exactly once.** The page counts a
-    decode as an `<img>` load with `naturalWidth > 1` (the 1×1 parking
-    placeholder and failed loads never count), and the host polls the counter
-    once per second while the open document can contain images; the delta is
-    charged against the estimate, so an image-heavy reading session recycles
-    instead of accreting decoded frames the renderer never returns.
+    reclaim on every idle window. `m_renderedOnce` is the gate, reset together
+    with the estimate when a discard kills the renderer.
+13. **Only the image decodes the reader caused are charged, and they are
+    tracked separately.** The page counts an `<img>` load with
+    `naturalWidth > 1` (the 1×1 parking placeholder and failed loads never
+    count) *and* only once the reader has moved the viewport since the current
+    DOM was built; `rerender()` resets that gate (a re-render rebuilds the
+    image DOM, so the decodes it triggers are page-caused), and in `eager`
+    mode no decode counts at all. The host polls the counter once per second
+    while the open document can contain images and charges the delta against
+    the estimate **and** against `m_imgCharge`. What a page decodes *by
+    itself* is the live set the next page reproduces, so charging it would
+    reclaim nothing and keep the estimate over budget in every generation (the
+    self-refresh loop, see Pitfalls). The split matters: a forced GC clears
+    the render part but not `m_imgCharge`, which is what keeps an image-heavy
+    reading session from GCing in a loop, and what the invisible discard is
+    for.
 14. **The JS heap cap is additive and only ever lowers memory.** It must never
-    be promoted into a substitute for the recycle (it neither bounds text-only
+    be promoted into a substitute for reclamation (it neither bounds text-only
     churn nor decoded images), so the estimate, its calibration and the
-    recycle triggers stay as they are. A binding cap makes real growth smaller
-    than the estimate charges; a slightly-early recycle is fine, a late one is
+    reclaim triggers stay as they are. A binding cap makes real growth smaller
+    than the estimate charges; a slightly-early reclaim is fine, a late one is
     not.
-15. **The cap reaches Chromium only through the env, before the engine
+15. **The JS flags reach Chromium only through the env, before the engine
     starts, and never over an explicit `--js-flags`.** Merging happens from
     the plugin and the `PreviewWidget` constructor before its own profile
     exists; both are idempotent and skip when the env already carries
-    `--js-flags` (a second switch would be silently dropped — the setting must
-    not look active without being). `KATEXDOWN_V8_CAP_MB` (an env int,
-    0 disables) overrides the stored setting for scripts and tests.
+    `--js-flags` (a second switch would be silently dropped — the flags must
+    not look active without being). The merged switch always carries
+    `--expose-gc` (the reclaim primitive) and the cap when configured.
+    `KATEXDOWN_V8_CAP_MB` (an env int, 0 disables the cap but not
+    `--expose-gc`) overrides the stored setting for scripts and tests.
+16. **The geometry a reload is laid out with is per document, a fingerprint of
+    the fresh page's layout, and never an author's dimension.** `m_imageDims`
+    is captured from the live page before a same-document recycle discards it,
+    pushed into the fresh page before its first render, cleared when another
+    document is attached or its URL changes (a save-as can move the document to
+    a folder where the same relative names mean other pictures), never
+    overwrites width/height the author wrote, and is provisional — the image's
+    first real decode on the fresh page corrects it. Exports never see it
+    (`data-kdx-sized="1"` boxes are stripped, like every other recorded one).
 
 ## Pitfalls (each already cost a debugging session)
 
 - **Image browsing accretes memory the text estimate cannot see.** Scrolling
   past a photo decodes it, and Chromium keeps a share of every decoded frame:
-  measured ~8-10 MB per photo scrolled past, in every image mode, sticky for
-  50+ s of idle, and produced without any render or navigation — so a
-  text-only estimator never fires. The decode poll (Invariant 13) exists for
-  this; do not "fix" it by removing the charge (back to unbounded accretion)
-  or by parking harder (parking already caps the *simultaneously decoded* set;
-  the retention is the renderer's, not the `<img>` elements').
+  measured ~8-10 MB per photo scrolled past, sticky for 50+ s of idle, and
+  produced without any render or navigation — so a text-only estimator never
+  fires. The decode poll (Invariant 13) exists for this; do not "fix" it by
+  removing the charge (back to unbounded accretion) or by parking harder
+  (parking already caps the *simultaneously decoded* set; the retention is the
+  renderer's, not the `<img>` elements'), and do not extend it to decodes the
+  reader did not cause (see the next pitfall).
+
+- **An image-heavy preview recycled itself forever (the reported bug).** The
+  decode charge counted *every* real decode, including the ones a page
+  performs by itself at load — and a fresh page reproduces exactly that set. A
+  document whose own decode set alone exceeded the budget therefore crossed the
+  budget again in every generation, with no user action: measured, an idle
+  six-photo document discarded and reloaded the page every ~3 s indefinitely
+  (and each reload also moved the reader, see below). Neither the JS heap cap
+  nor `eager` mode helps, because the loop is in the charge policy, not in the
+  renderer: with `eager` the page decodes everything at load, so it loops
+  hardest there. Fixed by Invariant 13 — the page's own set is never charged,
+  in any image mode. `idleImageHeavyDocumentDoesNotRecycleInALoop` pins it (a
+  fresh renderer every few seconds is the failure).
+
+- **A re-render after a scroll re-charged the page's own decodes (the
+  *residual* self-refresh).** The first fix gated the decode charge on "the
+  reader has moved the viewport in this page generation", but the gate stayed
+  open for the rest of the generation once a single scroll opened it. Every
+  later `rerender()` rebuilds the image DOM (the host pushes new text on every
+  debounced keystroke), so the images around the viewport decode again — and
+  with the gate still open each of those page-caused decodes was charged
+  (measured: 7 decodes after one scroll growing to 42 over five ordinary edits,
+  ~150 MB of pure fiction against an 8 MB budget). The estimate then stayed
+  over budget, and the maintenance recycled an idle document nobody was
+  touching — the "it still sometimes refreshes by itself" report. `rerender()`
+  now resets the gate (Invariant 13): a decode counts only while the reader has
+  moved the viewport since the DOM was last built.
+  `editorRendersAfterAScrollDoNotRechargeThePageOwnDecodes` pins it (the charged
+  set must not grow across edits, and the renderer must stay put).
+
+- **"Only process death returns renderer memory" was wrong, and it cost a
+  reload.** The design originally treated the discard+reload as the only
+  reclamation primitive, so the same-document recycle navigated (and flickered)
+  purely for memory. Measured: an explicit `window.gc()` returns 400-600 MB of
+  stranded DOM/V8 memory **in place**, repeatably, in ~40-150 ms, down to the
+  loaded footprint. The maintenance therefore reclaims with a forced GC
+  (merged `--expose-gc`), and the discard survives only for decoded images —
+  which a GC does not return — and only while the window is minimized. Do not
+  simplify this back to a visible reload, and do not treat the heap cap as the
+  reclaim: it bounds the peak between GCs and never returns the pages.
+  `idleTextChurnReclaimsInPlaceWithoutReload` pins the in-place reclaim (no
+  renderer process change, RSS actually comes down).
+
+- **A GC cannot return decoded images, so it must not loop on them.** After a
+  forced GC the estimate is exactly `m_imgCharge`. If images alone keep it over
+  budget, a policy that simply retries "over budget -> reclaim" would GC every
+  idle window forever for no gain. `reclaimAtIdle()` therefore GCs only when
+  there is render charge (`m_memEstimate > m_imgCharge`); the image residue
+  waits for the minimized-window discard. `imageDecodeResidueRecyclesOnlyWhenMinimized`
+  pins the visible half (no reload) and the minimized half (the discard).
 
 - **The "1×1 dot" bug.** Images parked *before their first decode* (below the
   fold) had the parking placeholder's own dimensions recorded as their box:
@@ -429,16 +604,51 @@ A doc that outgrows the page's engine set still triggers the one-time rebuild
   the freshest text (document switches can arrive before the first render),
   which is why `render()`/`loadPage()`/`exportToFile()` refresh `m_text` from
   the document before scanning.
+- **A reload that moves the reader is not "just a reload".** The image-residue
+  discard restores the reader's scroll position after the fresh page renders,
+  and it used to restore it against a page that knew no image geometry at all:
+  markdown carries only an image's `src`, so the fresh document laid out as if
+  every image were zero-height, `scrollTo` clamped to that much shorter
+  document, and the reader landed hundreds of pixels away (measured: 640 px on
+  a six-image document — and the layout then grew back under them as images
+  decoded). Do not "fix" this by scrolling later or repeatedly: images the
+  reader has already passed are never re-loaded by a lazy document, so their
+  height is unknown no matter how long the restore waits. Capture the boxes
+  with the position and hand both to the fresh page (Section 6).
+
+- **The recycle's discard retry could kill its own fresh load.** `idleTick`
+  retries a discard that Qt refused while its visibility flag was still
+  catching up — but a page whose discard already stuck looks exactly like one
+  that was refused: it is Active again (Qt re-activates it for the fresh
+  `setHtml`). The retry therefore discarded the recycle's fresh page before it
+  finished loading, which restarted the cycle, so the recycle never reached
+  `finalizeRecycle`, its safety timer aborted it, and the reader's position was
+  thrown away (measured: a flaky failure of the scroll restore in
+  `maintenanceRecycleKeepsTheReaderPlaceWithImages`, roughly one run in three).
+  `m_recycleDiscarded` marks the point after which the page in front of the
+  ticker is the fresh one (Invariant 7).
+
+- **A cached image is never "lazy".** Chromium loads a `loading="lazy"` image
+  immediately once its bytes are in the memory cache, so an image can be far
+  below the fold, keep `loading="lazy"`, and still decode the moment it is
+  re-rendered (measured while writing the geometry test: an image 48 000 px
+  down had already decoded). Only a src the page has never fetched is
+  reliably deferred — a test that needs "an image that has not decoded yet"
+  must give it a fresh URL (and the geometry test's far-away image is a
+  *second* file for exactly this reason).
+
 - **A giant fence is a span factory.** Tokenizing turns every token into a
   `<span>`; a single pasted minified bundle can mean tens of thousands of DOM
   elements, re-built on every keystroke. The fence-size cap above is what
   stops it — do not "fix" this by silently dropping oversized fences (the
   text must always render) or by removing the cap.
 - **A second `--js-flags` is silently ignored.** Chromium keeps the first
-  `--js-flags` switch, so merging a second one (e.g. appending our cap to an
-  env that already has `--js-flags=--expose-gc`) would *look* applied without
-  ever taking effect. The merge refuses instead (Invariant 15); envflagstest
-  pins the refusal.
+  `--js-flags` switch, so merging a second one (e.g. appending our
+  `--js-flags=--max-old-space-size=N,--expose-gc` to an env that already has
+  `--js-flags`) would *look* applied without ever taking effect. The merge
+  refuses instead (Invariant 15); `envflagstest` pins the refusal, and the
+  maintenance then finds no `window.gc` and disables in-place reclamation
+  rather than reloading a visible page (Pitfall above).
 - **Flags are read at engine start, not at widget creation.** QtWebEngine
   consumes `QTWEBENGINE_CHROMIUM_FLAGS` once per process, at its first
   profile/page/view. Applying the cap in the plugin constructor is
@@ -446,33 +656,40 @@ A doc that outgrows the page's engine set still triggers the one-time rebuild
   changing the setting never affects an already-running session — the config
   page tells the user to restart Kate.
 - **"The renderer never returns memory" is the default, not a bug report.**
-  QtWebEngine keeps a long-lived renderer's dead memory forever (measured:
+  Left alone, QtWebEngine keeps a long-lived renderer's dead memory (measured:
   tens of MB per full re-render of a large document, unbounded growth, no
   self-limiting GC). `performance.memory` is useless for tracking this — its
-  numbers only update when a GC runs, which is exactly what never happens.
-  Renderer RSS (the process' resident set) is the only honest signal.
+  numbers only update when a GC runs, which is exactly what never happens on
+  its own. Renderer RSS (the process' resident set) is the only honest signal,
+  and an explicit `window.gc()` is the reclaim (see the pitfall above).
 - **Visible pages cannot be frozen or discarded, and "hidden" is Qt's call.**
   `setLifecycleState(Frozen/Discarded)` on a shown page logs "page is visible"
   and does nothing. Telling the *page* it is hidden
   (`QWebEnginePage::setVisible(false)`, which leaves the widget on screen
-  showing its last frame) is what makes the discard legal. Early prototypes
-  froze unshown widgets and "proved" freeze purges memory — that purge only
-  runs for pages that were never shown, so it must not be relied on for an
-  open panel.
+  showing its last frame) is what makes the discard legal. That is why the only
+  same-document reload left is the image-residue discard, and why it is gated
+  on the **minimized** window (`previewWindowMinimized()`): the page is then
+  genuinely invisible to the user. Early prototypes froze unshown widgets and
+  "proved" freeze purges memory — that purge only runs for pages that were
+  never shown, so it must not be relied on for an open panel.
 - **A discard that is part of a recycle must load the mirrored document, not
   wait for the committed URL to reload.** Loading the old document first and
   then replacing it doubles the work and can apply stale engines/guard roots.
   `setHtml` on a discarded page restores it and navigates straight to the new
   content (verified empirically), which is what the recycle's discard handler
   does.
-- **An idle recycle must not run while the user is touching the preview.** The
-  quiet gate watches text changes, input events, focus and pending work; a
-  same-document recycle restores the scroll *after* the fresh render. Without
-  the scroll restore a reload would visibly jump a reading user to the top.
-- **The recycle estimate must reset when the memory is actually gone.** A
-  discard (process death) and a closed-panel freeze (which *does* purge)
-  both reset the estimate; otherwise the budget would fire immediately after
-  the very recycle that just cleaned the renderer.
+- **An idle reclaim must not run while the user is touching the preview.** The
+  quiet gate watches text changes, input events, focus and pending work (and a
+  charged image decode counts as activity, so a scrolling reader is neither
+  GC'd nor reloaded mid-scroll); the image-residue discard restores the scroll
+  *after* the fresh render. Without the scroll restore a reload would visibly
+  jump a reading user to the top.
+- **The estimate must reset when the memory is actually gone.** A discard
+  (process death), a closed-panel freeze (which *does* purge) and an in-place
+  forced GC all reset the reclaimable part; otherwise the budget would fire
+  immediately after the very reclaim that just cleaned the renderer. The GC
+  keeps `m_imgCharge`, because decoded images survive it and must still be
+  accounted for.
 
 - **A gate heuristic stricter than the renderer strands real math.**
   `lineLooksLikeMath` used to treat a `$` right after a digit as currency
@@ -493,14 +710,19 @@ A doc that outgrows the page's engine set still triggers the one-time rebuild
   `KATEXDOWN_DATA_DIR` points at a fake asset dir (used to fake KaTeX assets
   so engine-gating tests need no downloaded data);
   `KATEXDOWN_MEM_BUDGET_MB`/`KATEXDOWN_MEM_IDLE_MS`/`KATEXDOWN_MEM_MAX_AGE_MS`
-  shorten the recycle budget and quiet window, `KATEXDOWN_MEM_IMG_CHARGE_MB`
-  sets a flat per-decode image charge (deterministic for tests), and
-  `KATEXDOWN_MEM_OFF=1`
-  disables the policy ticker so tests can drive `performMemoryRecycle()`
-  directly; `KATEXDOWN_V8_CAP_MB` overrides the JS heap cap setting (an int in
-  MB, 0 = off; the tests' env also sets `QTWEBENGINE_CHROMIUM_FLAGS` and the
-  `PreviewWidget` constructor merges the configured cap on top of it, so every
-  engine test runs with production's 128 MB default). RSS is measured in tests
+  shorten the reclaim budget and quiet window, `KATEXDOWN_MEM_IMG_CHARGE_MB`
+  sets a flat per-decode image charge (deterministic for tests),
+  `KATEXDOWN_MEM_MINIMIZED=1` makes `previewWindowMinimized()` report true (the
+  offscreen harness cannot always minimize, and the image-residue discard needs
+  to be drivable deterministically), and `KATEXDOWN_MEM_OFF=1` disables the
+  policy ticker so tests can drive `performMemoryRecycle()` directly (it also
+  disables the in-place GC, since nothing is ever "due");
+  `KATEXDOWN_V8_CAP_MB` overrides the JS heap cap setting (an int in MB, 0 =
+  cap off — `--expose-gc` is still merged). The tests' env also sets
+  `QTWEBENGINE_CHROMIUM_FLAGS`, and the `PreviewWidget` constructor merges the
+  production flags on top of it (the 64 MB default cap plus `--expose-gc`), so
+  every engine test can call `window.gc` unless its own env already carries
+  `--js-flags`. RSS is measured in tests
   by walking `/proc` for the test process'
   QtWebEngine descendants (Linux; the RSS tests skip elsewhere). Note that
   the policy refuses to recycle a *focused* preview, and the offscreen test
@@ -523,7 +745,10 @@ A doc that outgrows the page's engine set still triggers the one-time rebuild
     HTML escaping but renders zero token spans, while a normal fence in the
     same document still highlights.
   - `renderfeaturestest::imageModesControlDecoding` — the three modes, the
-    park/restore cycle, and export normalization (Invariant 5).
+    park/restore cycle, export normalization (Invariant 5), and the
+    decode-charge gating of Invariant 13 (a forced re-decode after reader
+    input is charged in a managing mode, and never in `eager`; a programmatic
+    `scrollTo` alone is not reader input).
   - `renderfeaturestest::parkingPreservesTheImageBox` — Invariant 1 (below-the-
     fold image is not parked until decoded; park/unpark leaves `scrollHeight`
     and the rendered box untouched).
@@ -536,24 +761,58 @@ A doc that outgrows the page's engine set still triggers the one-time rebuild
     unrecycled run grows past a gigabyte), a fresh renderer process appears,
     and the preview stays functional.
   - `rendermemorytest::maintenanceRecycleFreesMemoryAndKeepsThePage` —
-    Invariant 9: a same-document recycle reclaims hundreds of MB, keeps the
-    content, and restores the exact scroll position.
+    Invariants 7/9: the discard+reload reclaims the churn, keeps the content,
+    and restores the exact scroll position.
   - `rendermemorytest::imagesSurviveMaintenanceRecycle` — a relative image
     still decodes after a recycle (the fresh load re-applies the local-file
     guard) with no stranded failure state.
-  - `rendermemorytest::idleOpenDocumentDoesNotRecycleInALoop` — Invariant 12:
-    an idle open preview of a document whose text charge exceeds the budget
-    stays put (no churn, no loop); one edit recycles exactly once and the
-    fresh page settles again.
-  - `rendermemorytest::imageDecodesChargeTheRecycleBudget` — Invariant 13:
-    real image decodes (flat charge via `KATEXDOWN_MEM_IMG_CHARGE_MB`) push
-    the estimate over the budget and trigger the recycle, and images decode
-    again on the fresh page without a stranded failure state.
+  - `rendermemorytest::idleTextChurnReclaimsInPlaceWithoutReload` — Invariants
+    7/12: an idle open preview of a large document stays put; one edit crosses
+    the budget and is reclaimed **in place** (a forced GC — the renderer
+    process never changes, RSS actually comes down), then it settles. Before
+    the redesign this reloaded the renderer, which was the intrusive
+    self-refresh.
+  - `rendermemorytest::imageDecodeResidueRecyclesOnlyWhenMinimized` —
+    Invariants 7/13: decodes the *reader* caused (a wheel event + a scroll
+    that pulls far-below-the-fold images in; flat charge via
+    `KATEXDOWN_MEM_IMG_CHARGE_MB`) push the estimate over the budget; the
+    **visible** page must not reload (the image residue is not GC-reclaimable),
+    and the same page recycles as soon as `KATEXDOWN_MEM_MINIMIZED` reports the
+    window minimized — with images decoding again on the fresh page and no
+    stranded failure state.
+  - `rendermemorytest::idleImageHeavyDocumentDoesNotRecycleInALoop` —
+    Invariants 12/13 for images: an idle open document whose *own* decode set
+    crosses the budget (2048×2048 photos, three of them charge the 8 MiB cap)
+    stays on one renderer process and charges nothing (no GC, no reload).
+    Before the fix a fresh renderer appeared every ~3 s.
+  - `rendermemorytest::maintenanceRecycleKeepsTheReaderPlaceWithImages` —
+    Invariants 7/9/16: an image-residue discard of an image document keeps the
+    exact scroll position *and* the content under the viewport top (the
+    geometry the recycled page knew survives into the fresh one), and the
+    remembered boxes never leak into an export. Also the regression test for
+    the discard-retry livelock (it failed ~1 run in 3 before
+    `m_recycleDiscarded`).
+  - `rendermemorytest::editorRendersAfterAScrollDoNotRechargeThePageOwnDecodes`
+    — Invariant 13's re-render reset: after one reader scroll, five ordinary
+    edits (each a re-render that rebuilds the images around the viewport) must
+    not charge a single extra decode, and the renderer must not be reloaded.
+    Before the reset the charged set grew 7 → 42 and the estimate crossed the
+    budget with no reader action left to blame (the residual self-refresh).
+  - `renderfeaturestest::rememberedImageBoxesShapeAFreshReload` — the page side
+    of Invariant 16: `__kdxRecycleState()` reports the boxes the page recorded,
+    a fresh page lays an *undecoded* image out with the remembered box it was
+    given, the author's own `width`/`height` win over the memory, and a real
+    decode corrects a (deliberately wrong) remembered box — on the image that
+    decoded, not on whichever image a loop visited last (the bad closure this
+    test caught). Note for anyone extending it: Chromium loads a
+    `loading="lazy"` image immediately when it is already in the memory cache,
+    so "an image that never decodes" needs a src the page has not fetched yet.
   - `envflagstest` (no web engine) — Invariant 15 and the delivery rules of
-    the JS heap guard: the cap is appended when the env is empty or carries
-    non-js-flags, an explicit `--js-flags` in the env always wins, cap 0 and
-    `KATEXDOWN_V8_CAP_MB=0` leave the env untouched, and the env override
-    beats the stored value while an unparsable override falls back to it.
+    the renderer JS flags: the flags are appended when the env is empty or
+    carries non-js-flags, `--expose-gc` is always included (even with the cap
+    off), an explicit `--js-flags` in the env always wins, and
+    `KATEXDOWN_V8_CAP_MB` overrides the stored cap while an unparsable override
+    falls back to it.
 - Tests run headless: `QT_QPA_PLATFORM=offscreen`, `--disable-gpu
   --no-sandbox`, and they show + resize the preview because IntersectionObserver
   callbacks are driven by compositor frames.
@@ -570,19 +829,26 @@ A doc that outgrows the page's engine set still triggers the one-time rebuild
 - Image policy: `data/js/preview.js` (image section: `armImages`, `swapOut`,
   `swapIn`, `recordDims`, `onImgLoad/onImgError`, `__setImageMode`,
   `__serializedHtml`), `data/css/base.css` (the `data-pv-imgmode` height rule).
+- Remembered image geometry: `data/js/preview.js` (`imageGeometry`,
+  `applyRememberedDims`, `__setImageDims`, `__kdxRecycleState`, the
+  `data-kdx-remembered` branch of `recordDims`), `src/previewwidget.{h,cpp}`
+  (`m_imageDims`, the capture in `performMemoryRecycle`, `applyImageDims` from
+  `loadFinished`, the clear in `attachDocument`).
 - Renderer-memory maintenance: `src/previewwidget.{h,cpp}` (`idleTick` open-
-  panel branch incl. the 1 Hz decode poll, `handleDecodeStats`,
-  `performMemoryRecycle`/`beginRecycle`/`finalizeRecycle`/
-  `abortRecycle`, the lifecycle-state handler's discard/frozen branches
-  (resets `m_renderedOnce` and the decode bookkeeping),
-  `noteRenderWork`/`noteActivity`/`recycleDue`/`recycleIdle`,
-  `readMemTuning`, the `attachDocument` recycle + same-folder fast path),
-  the first-render gate (`m_renderedOnce`) and the image-charge constants in
-  `render()`/`handleDecodeStats`; the decode counter lives in
-  `data/js/preview.js` (`__kdxDecodeStats`);
-  tests in `tests/rendermemorytest.cpp`.
-- JS heap guard: `src/kdxchromiumflags.h` (env merge + override helper),
-  applied from `src/plugin.cpp` (plugin ctor) and `src/previewwidget.cpp`
-  (ctor, before its profile); setting + config UI in `src/settings.{h,cpp}`
-  (`V8HeapCapMb`) and `src/configpage.{h,cpp}` ("JS memory cap", 0–1024 MB);
-  tests in `tests/envflagstest.cpp`.
+  panel branch incl. the 1 Hz decode poll, `handleDecodeStats`, the in-place
+  `reclaimInPlace`/`reclaimAtIdle` and `m_imgCharge`/`m_gcUnavailable`, the
+  image-residue `performMemoryRecycle`/`beginRecycle`/`finalizeRecycle`/
+  `abortRecycle` and `previewWindowMinimized`, the lifecycle-state handler's
+  discard/frozen branches (resets `m_renderedOnce`, `m_imgCharge` and the
+  decode bookkeeping), `noteRenderWork`/`noteActivity`/`recycleDue`/
+  `recycleIdle`, `readMemTuning`, the `attachDocument` recycle + same-folder
+  fast path), the first-render gate (`m_renderedOnce`) and the image-charge
+  constants in `render()`/`handleDecodeStats`; the decode counter lives in
+  `data/js/preview.js` (`__kdxDecodeStats`, gated on reader input and reset by
+  `rerender()`); tests in `tests/rendermemorytest.cpp`.
+- Renderer JS flags (`--expose-gc` + the V8 heap cap): `src/kdxchromiumflags.h`
+  (`applyJsFlags` env merge + `effectiveV8HeapCapMb` override helper), applied
+  from `src/plugin.cpp` (plugin ctor) and `src/previewwidget.cpp` (ctor,
+  before its profile); setting + config UI in `src/settings.{h,cpp}`
+  (`V8HeapCapMb`) and `src/configpage.{h,cpp}` ("JS memory cap", 0–1024 MB,
+  default 64); tests in `tests/envflagstest.cpp`.
