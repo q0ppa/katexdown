@@ -69,6 +69,14 @@ Qt-minor mismatch is the one failure Kate does not report (a mismatched plugin
 is simply never listed). `build-kf6.sh` pins KF6 `6.30.0`; bump it only together
 with the CI cache key.
 
+Both scripts also pin `CMAKE_CXX_STANDARD=20`. KF6 6.30 is a C++20 codebase
+(`KTextEditor`'s public `katedocument.h` uses `std::span`, and
+`katetextfolding.cpp` uses parenthesized aggregate initialization); without the
+pin, ECM derives the standard from `KDE_INTERNAL_COMPILERSETTINGS_LEVEL`, which
+the CI resolved to C++17 and KTextEditor failed to compile. The CI cache key
+carries `cxx20`, so a prefix built under a different standard is never reused
+(a C++17 prefix mixed with C++20 objects is not something to trust).
+
 `build-kf6.sh`'s list is the transitive build dependency closure of KTextEditor
 6.30, generated from KDE's `dependency-data-kf6-qt6` and ordered topologically,
 minus `kdoctools`, `breeze-icons` and `kglobalaccel`. `kdoctools`/`breeze-icons`

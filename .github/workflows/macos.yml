@@ -119,16 +119,19 @@ jobs:
           brew install cmake ninja pkgconf qt gettext bison
 
       # KF6 is not shipped by Homebrew, so it is source-built. Cache the prefix by pinned KF6
-      # version + pinned Qt minor + runner arch: anything else and the cached frameworks would
-      # have the wrong ABI. A miss is slow but correct; a partial cache is repaired by
-      # build-kf6.sh, which skips frameworks already present.
+      # version + pinned Qt minor + C++ standard + runner arch: anything else and the cached
+      # frameworks would have the wrong ABI. The C++ standard is in the key because build-kf6.sh
+      # pins C++20; without it a partial cache saved by a run that built as C++17 would be restored
+      # and mixed with C++20 - a miss is slow but correct, a mixed-standard prefix is not. A partial
+      # cache of the same standard is repaired by build-kf6.sh, which skips frameworks already
+      # present.
       - name: cache KF6
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
         with:
           path: ${{ env.KATEXDOWN_KF6_PREFIX }}
-          key: kf6-${{ env.KF6_VERSION }}-qt${{ env.QT_MINOR }}-${{ runner.arch }}
+          key: kf6-${{ env.KF6_VERSION }}-qt${{ env.QT_MINOR }}-cxx20-${{ runner.arch }}
           restore-keys: |
-            kf6-${{ env.KF6_VERSION }}-qt${{ env.QT_MINOR }}-
+            kf6-${{ env.KF6_VERSION }}-qt${{ env.QT_MINOR }}-cxx20-
 
       # -j3: the standard arm64 macOS runner has 3 vCPUs / 7 GB, and parallel KIO/KTextEditor
       # link steps are the memory peak. The cache makes this a no-op after the first run.

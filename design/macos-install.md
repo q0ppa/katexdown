@@ -168,6 +168,14 @@ CI cannot diverge:
   dependency, the framework that needs it fails its configure with the missing
   package name and the list must be updated.
 
+  The configure pins `-DCMAKE_CXX_STANDARD=20`. KF6 6.30 requires C++20
+  (`katedocument.h` uses `std::span`; `katetextfolding.cpp` uses parenthesized
+  aggregate initialization). ECM normally selects C++20 itself, but its choice
+  follows `KDE_INTERNAL_COMPILERSETTINGS_LEVEL`, which a restored cache or a
+  different ECM can resolve lower - the first macOS CI run built KTextEditor as
+  C++17 and failed on exactly that aggregate. The CI cache key includes `cxx20`
+  so a prefix built under another standard is never reused.
+
   The configure also passes `-DKDE_INSTALL_BUNDLEDIR="$prefix/Applications"`.
   ECM defaults `KDE_INSTALL_BUNDLEDIR` to the *absolute* `/Applications/KDE` on
   macOS (it is not relative to `CMAKE_INSTALL_PREFIX`), and KTextEditor installs

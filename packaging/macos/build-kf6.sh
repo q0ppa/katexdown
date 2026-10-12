@@ -38,6 +38,13 @@
 #                           write there (outside the prefix and usually not writable) and fails the
 #                           install. Keep bundles inside the prefix like everything else.
 #   CMAKE_OSX_ARCHITECTURES=arm64 - Method 1 is arm64-only (design/macos-install.md).
+#   CMAKE_CXX_STANDARD=20  - KF6 6.30 is a C++20 codebase: KTextEditor's public katedocument.h
+#                           exposes std::span and katetextfolding.cpp builds an aggregate with
+#                           IdAndFlag(id, flags). ECM normally sets 20, but its choice follows
+#                           KDE_INTERNAL_COMPILERSETTINGS_LEVEL, which a restored cache / different
+#                           ECM can resolve lower - the first macOS CI run built KTextEditor as
+#                           C++17 and failed. Pin it so a cache generation cannot build part of the
+#                           prefix as C++17 (the CI cache key also carries cxx20).
 #   BISON_EXECUTABLE/FLEX_EXECUTABLE - macOS ships bison 2.3, and Solid (a KIO dependency)
 #                           needs >= 3.0; Homebrew's bison is keg-only, so its path is passed in.
 #
@@ -178,6 +185,8 @@ build_one() { # $1 repo, $2 version, $3 prefix, $4 qt_prefix, $5 cache_dir, $6 j
             -DCMAKE_INSTALL_PREFIX="$prefix" \
             -DCMAKE_PREFIX_PATH="$prefix;$qt_prefix" \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_CXX_STANDARD=20 \
+            -DCMAKE_CXX_STANDARD_REQUIRED=ON \
             -DBUILD_TESTING=OFF \
             -DBUILD_QCH=OFF \
             -DBUILD_EXAMPLES=OFF \

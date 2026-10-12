@@ -214,9 +214,14 @@ main() {
 
     log "configuring the plugin (KF6 $kf6_prefix)"
     # CMAKE_OSX_ARCHITECTURES is explicit so a Rosetta shell cannot produce an x86_64 .so by accident.
+    # KF6 6.30 is a C++20 build (see build-kf6.sh); pin the same standard here so the plugin and the
+    # frameworks it links share it regardless of what ECM's KDE_INTERNAL_COMPILERSETTINGS_LEVEL
+    # resolves to.
     cmake -B "$build_dir" -S "$repo_root" -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_OSX_ARCHITECTURES=arm64 \
+        -DCMAKE_CXX_STANDARD=20 \
+        -DCMAKE_CXX_STANDARD_REQUIRED=ON \
         -DCMAKE_PREFIX_PATH="$prefix_path" \
         -DBUILD_TESTING="$testing"
     log "building (${jobs} jobs)"
