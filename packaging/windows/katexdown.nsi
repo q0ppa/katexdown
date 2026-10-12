@@ -17,7 +17,7 @@
 ;
 ;  HOW TO BUILD (the CI does this; makensis runs with the payload staged by
 ;  packaging/windows/make-payload.ps1 next to this file):
-;      makensis /DVERSION=0.3.8 /DQT_MINOR=6.11 /DPAYLOAD=dist\payload katexdown.nsi
+;      makensis /DVERSION=0.4.0 /DQT_MINOR=6.11 /DPAYLOAD=dist\payload katexdown.nsi
 ;
 ;  Compile-time defines:
 ;      VERSION   the Katexdown version; goes into the exe file name and into

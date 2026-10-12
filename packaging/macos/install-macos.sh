@@ -45,11 +45,12 @@
 #   plugin) restores a working install. Every modification happens after all guards passed, and the
 #   plugin is always copied fresh, so re-running rewrites the same references to the same values.
 #
-# UNTESTED ON macOS AS OF THIS REVISION
-#   This flow was written from the verified facts in design/macos-install.md and the toolchain
-#   evidence recorded in packaging/macos/README.md, but it has not been executed on a Mac in this
-#   repository yet. packaging/macos/README.md lists exactly what must be checked on a Mac, and
-#   .github/workflows/macos.yml runs the flow end to end against a real Kate dmg.
+# TESTED, BUT NOT YET AGAINST A REAL KATE
+#   The install -> sign -> verify -> uninstall flow has been exercised on arm64 macOS against a
+#   synthesized Kate.app with the real macdeployqt/otool/install_name_tool/codesign, and
+#   test-install-macos.sh covers the guard/manifest logic. What is still unproven is a real Kate
+#   dmg end to end - see packaging/macos/README.md for the exact list, and
+#   .github/workflows/macos.yml, which runs that flow against one.
 
 set -euo pipefail
 
@@ -914,6 +915,13 @@ remove_from_manifest() { # $1 = kate -> 0 when a manifest existed
         # Directories are left to the rmdir pass below, which only removes what is empty by then.
     done < "$list"
     log "removed $removed file(s) recorded in $mf"
+    # Codesign creates _CodeSignature/ directories after the manifest snapshot, so they are not in
+    # the manifest. Left behind, a framework whose files were just removed keeps only _CodeSignature
+    # and the re-sign below fails with "bundle format unrecognized". Drop every one; sign_bundle
+    # regenerates the ones that are still needed.
+    find "$kate" -type d -name _CodeSignature -prune -print 2>/dev/null | while IFS= read -r d; do
+        rm -rf "$d"
+    done
     # Prune directories the payload created, deepest first; rmdir refuses any directory something
     # else still uses, so Kate's own structure is never touched.
     dirs="$work_dir/dirs.txt"

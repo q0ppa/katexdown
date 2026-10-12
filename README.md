@@ -195,6 +195,10 @@ Homebrew and re-signs the bundle.
 
 On an Apple Silicon Mac (see the notes below), with Homebrew installed:
 
+> [!WARNING]
+> Not released yet. No GitHub release ships the macOS assets, so this URL 404s
+> until the macOS CI job passes and a release carrying them is cut.
+
 ```bash
 curl -fsSL https://github.com/q0ppa/katexdown/releases/latest/download/install-macos.sh | bash
 ```
@@ -270,10 +274,12 @@ Notes for macOS:
   for that minor is needed. `.github/workflows/macos.yml` tests against the
   newest Kate and fails when that happens; the failure is the signal to
   rebuild.
-- This flow is new and has not been executed end-to-end on a Mac in this
-  repository yet. `packaging/macos/README.md` lists exactly what is verified
-  and what still needs checking on macOS; the CI job runs the full install →
-  render test → uninstall sequence against a real Kate dmg.
+- This flow has not shipped in a release yet: the macOS CI job has not passed,
+  so `releases/latest/download/install-macos.sh` 404s until it does. It is also
+  new and has not been executed end-to-end on a Mac in this repository yet.
+  `packaging/macos/README.md` lists exactly what is verified and what still
+  needs checking on macOS; the CI job runs the full install → render test →
+  uninstall sequence against a real Kate dmg.
 
 #### How the macOS release is produced (for maintainers and forks)
 

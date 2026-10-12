@@ -120,8 +120,9 @@ version+Qt-minor+arch-keyed cache; build the plugin and the test binaries with
 hdiutil-mount, copy `kate.app` out, refuse when its Qt minor differs from the
 pin — the canary); run `install-macos.sh` on the copy and then
 `previewlifecycletest` with `DYLD_FRAMEWORK_PATH`/`QT_PLUGIN_PATH` pointed at the
-patched app (plus `QTWEBENGINE_RESOURCES_PATH`/`QTWEBENGINE_LOCALES_PATH` as a
-belt-and-braces measure), so the engine under test is the one the installer
+patched app (plus `QTWEBENGINE_RESOURCES_PATH`/`QTWEBENGINE_LOCALES_PATH`
+derived from where macdeployqt actually put the framework's Resources - never a
+hardcoded `Contents/Resources`, which has no WebEngine data), so the engine under test is the one the installer
 deployed, not Homebrew's complete Qt; uninstall and assert the plugin is gone;
 publish `katexdown-<version>-macos-arm64.so`, the versionless
 `katexdown-macos-arm64.so` alias the installer's `latest/download` URL needs,
@@ -145,7 +146,7 @@ Two scripts, both called by `.github/workflows/macos.yml` so a manual build and
 CI cannot diverge:
 
 - **`packaging/macos/build-plugin.sh`** configures the plugin against Homebrew
-  Qt (`brew install cmake ninja qt gettext bison`) and a KF6 prefix, with
+  Qt (`brew install cmake ninja pkgconf qt gettext bison`) and a KF6 prefix, with
   `CMAKE_OSX_ARCHITECTURES=arm64`, and writes
   `dist/katexdown-<version>-macos-arm64.so`. It reads the pinned Qt minor out of
   `install-macos.sh` (`KATEXDOWN_QT_MINOR`) and refuses to build when Homebrew's
@@ -166,6 +167,16 @@ CI cannot diverge:
   disabling needed behaviour. If a future KF6 release adds a required
   dependency, the framework that needs it fails its configure with the missing
   package name and the list must be updated.
+
+  The configure also passes `-DKDE_INSTALL_BUNDLEDIR="$prefix/Applications"`.
+  ECM defaults `KDE_INSTALL_BUNDLEDIR` to the *absolute* `/Applications/KDE` on
+  macOS (it is not relative to `CMAKE_INSTALL_PREFIX`), and KTextEditor installs
+  its `ktexteditor-script-tester` developer tool as a `.app` bundle. Without the
+  override the install step tries to create `/Applications/KDE/...`, which does
+  not exist on a CI runner and is not writable by the build user — so the
+  framework configures and compiles, then fails at `cmake --install`. Keeping
+  bundles inside the prefix leaves the host's `/Applications` untouched; the
+  prefix is a build-time means to an end and is never shipped.
 
 ## Deferred: Method 1b (self-hosted WebEngine payload)
 
@@ -232,6 +243,16 @@ re-signs; the payload is verified against a real Kate before release.
   document re-running the installer.
 - **Notarization is not restorable**: the clean revert is
   `brew reinstall --cask kate`.
+- **Codesign artifacts are not in the manifest, and `--deep` makes it worse**:
+  the manifest is snapshotted *before* `sign_bundle`, so the `_CodeSignature/`
+  directories codesign drops into every nested framework and `.app` are absent
+  from it. Uninstall must delete those before pruning the payload's directories:
+  otherwise a removed framework keeps only `_CodeSignature`, becomes an invalid
+  bundle, and `codesign --verify --deep --strict` (and the re-sign before it)
+  fails with "bundle format unrecognized". `remove_from_manifest` clears every
+  `_CodeSignature` under the bundle first; `sign_bundle` regenerates the ones
+  still needed. `test-install-macos.sh`'s fake `codesign` re-creates nested
+  signatures for `--deep` so this cannot silently regress.
 - **Translations lie**: `qtwebengine_*.qm` in the bundle do not mean WebEngine
   is present; check for the framework/helper/resources.
 - **`--deep` sign is deprecated**; provide a bottom-up fallback and verify with

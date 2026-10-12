@@ -34,7 +34,10 @@ jobs:
         run: |
           set -Eeuo pipefail
           proj=$(grep -oP '^project\([^)]*VERSION\s+\K[0-9.]+' CMakeLists.txt)
-          if [ "v$proj" != "$GITHUB_REF_NAME" ]; then
+          # A pre-release tag carries a hyphen suffix (v1.2.0-rc1); compare only its base version so
+          # the prerelease branch below is actually reachable.
+          tag_base="${GITHUB_REF_NAME%%-*}"
+          if [ "v$proj" != "$tag_base" ]; then
             echo "::error::tag $GITHUB_REF_NAME does not match CMake project version v$proj"
             exit 1
           fi

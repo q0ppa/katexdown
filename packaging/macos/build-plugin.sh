@@ -15,7 +15,7 @@
 #   TextToSpeech and KIconThemes needs Qt Svg, so these are build dependencies, not plugin ones),
 #   plus cmake and ninja:
 #
-#       brew install cmake ninja qt gettext bison
+#       brew install cmake ninja pkgconf qt gettext bison
 #
 #   A KF6 prefix built against the same Qt. Point --kf6-prefix at one, or let this script build it
 #   with build-kf6.sh (pinned version, cached by CI).
@@ -97,7 +97,7 @@ find_brew() {
     elif [ -x /opt/homebrew/bin/brew ]; then
         b="/opt/homebrew/bin/brew"
     fi
-    [ -n "$b" ] || die "Homebrew not found. Install it (https://brew.sh) and run 'brew install cmake ninja qt gettext bison'"
+    [ -n "$b" ] || die "Homebrew not found. Install it (https://brew.sh) and run 'brew install cmake ninja pkgconf qt gettext bison'"
     printf '%s' "$b"
 }
 

@@ -207,6 +207,24 @@ if [ "${FAKE_CODESIGN_DEEP_BROKEN:-0}" = "1" ]; then
         *)        rm -f "$FAKE_ROOT/needs-resign"; exit 0 ;;
     esac
 fi
+# Real codesign drops a _CodeSignature/ directory into every bundle/framework it signs, and that
+# happens AFTER the installer's pre-signing manifest snapshot. Simulate it so the uninstall path is
+# forced to clear those too: otherwise a removed framework is left with only _CodeSignature and the
+# re-sign fails with "bundle format unrecognized".
+last=""
+for a in "$@"; do last="$a"; done
+if [ -n "$last" ] && [ -d "$last" ]; then
+    mkdir -p "$last/_CodeSignature" 2>/dev/null || true
+    # --deep signs nested code too; mirror that so the uninstall path has to clear signatures that
+    # were not in the pre-signing manifest.
+    case "$*" in
+        *--deep*)
+            find "$last" -type d \( -name '*.framework' -o -name '*.app' \) -print 2>/dev/null | while IFS= read -r nested; do
+                mkdir -p "$nested/_CodeSignature" 2>/dev/null || true
+            done
+            ;;
+    esac
+fi
 exit 0
 EOF
 
@@ -469,8 +487,15 @@ check "--help documents every supported mode" \
 check "an unknown argument is refused" \
     "! /bin/bash \"$INSTALLER\" --bogus 2>/dev/null"
 
-out="$(/bin/bash "$INSTALLER" --doctor 2>&1 || true)"
-assert_contains "$out" "for macOS" "the installer refuses to run off macOS"
+# This suite is normally run on Linux, where the installer must refuse. On macOS the same bare
+# invocation is a real doctor run against the host, so the refusal cannot be exercised here.
+if [ "$(uname -s)" != "Darwin" ]; then
+    out="$(/bin/bash "$INSTALLER" --doctor 2>&1 || true)"
+    assert_contains "$out" "for macOS" "the installer refuses to run off macOS"
+else
+    printf 'test: ok   (off-macOS refusal not applicable: this host is macOS)\n'
+    checks=$((checks + 1))
+fi
 
 # ---- doctor ------------------------------------------------------------------------------
 
@@ -508,8 +533,11 @@ fi
 # Kate found by Spotlight instead of --kate.
 ENV_MDFIND="$(setup_env mdfind)"
 printf 'FAKE_MDFIND=%s\n' "$ENV_MDFIND/Kate.app" >> "$ENV_MDFIND/fake.env"
+# find_kate_app resolves the bundle with pwd -P; on macOS /tmp is a symlink to /private/tmp, so
+# compare against the resolved path rather than the raw one.
+MDFIND_EXPECTED="$(cd "$ENV_MDFIND/Kate.app" && pwd -P)"
 out="$(run_installer "$ENV_MDFIND" --doctor 2>&1 || true)"
-assert_contains "$out" "Kate bundle: $ENV_MDFIND/Kate.app" "Kate is found via mdfind"
+assert_contains "$out" "Kate bundle: $MDFIND_EXPECTED" "Kate is found via mdfind"
 
 # No Kate anywhere: the doctor must say so, and name every place it looked.
 ENV_NOKATE="$(setup_env nokate)"

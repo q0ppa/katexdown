@@ -49,7 +49,7 @@ and re-signing cannot drift apart.
 Builds run on an arm64 Mac (`macos-14`/`macos-15`) with Homebrew:
 
 ```sh
-brew install cmake ninja qt gettext bison
+brew install cmake ninja pkgconf qt gettext bison
 
 # 1. KF6 (KTextEditor + its closure), pinned, built against the Homebrew Qt.
 #    The prefix is cacheable; re-running skips frameworks already installed.
@@ -74,9 +74,12 @@ with the CI cache key.
 minus `kdoctools`, `breeze-icons` and `kglobalaccel`. `kdoctools`/`breeze-icons`
 are docs/themes only (disabled with `CMAKE_DISABLE_FIND_PACKAGE_KF6DocTools=ON`
 / `USE_BreezeIcons=OFF`); `kglobalaccel` is Linux/FreeBSD-only and is skipped by
-KXmlGui on APPLE anyway, so nothing in the closure links it. If a
-future KF6 adds a required dependency, the framework that needs it fails its
-configure loudly with the missing package name; add it to the list. The plugin
+KXmlGui on APPLE anyway, so nothing in the closure links it. The configure also
+passes `-DKDE_INSTALL_BUNDLEDIR="$prefix/Applications"`: ECM defaults that to
+the absolute `/Applications/KDE` on macOS, so KTextEditor's `.app` bundle install
+would otherwise fail on a runner that has no such directory (and cannot create
+it). If a future KF6 adds a required dependency, the framework that needs it
+fails its configure loudly with the missing package name; add it to the list. The plugin
 build itself does **not** link the Homebrew/KF6 prefixes at runtime — installing
 into Kate rewrites every reference to `@executable_path/../Frameworks/...`.
 
@@ -124,42 +127,46 @@ bottle (or Method 1b) exists, uncomment the `x86_64`/`macos-15-intel` leg.
 
 ## What has and has not been verified
 
-**Verified here (Linux, no Mac, no network):**
+**Verified in an arm64 macOS 15 sandbox with Homebrew Qt 6.11.2 (no Nix):**
 
-- `install-macos.sh`'s logic is covered by `packaging/macos/test-install-macos.sh`,
-  which shadows `uname`, `brew`, `macdeployqt`, `otool`,
-  `install_name_tool`, `codesign`, `hdiutil`'s friends etc. with fakes and runs
-  the real script: the Qt-minor guard (patch drift accepted, minor refused), the
-  arch/Rosetta/host guards, Kate discovery, the running-Kate refusal, the
-  closure pass including the "never copy a KF6 library" rule, the manifest, the
-  `--deep` → bottom-up signing fallback, idempotency, uninstall symmetry and
-  `--force`/`--purge`. Run it with `packaging/macos/test-install-macos.sh`.
-- `build-plugin.sh --print-qt-minor` and `build-kf6.sh --print-version` are pure
-  text/version logic and run anywhere.
+- `build-kf6.sh` source-builds the whole KF6 6.30.0 closure against Homebrew Qt
+  and installs it. That run is what surfaced the missing `pkgconf` dependency:
+  KArchive's configure does a required `find_package(PkgConfig)`, and the
+  documented `brew install` line did not provide it, so the CI/recipe now
+  install `pkgconf` and `build-kf6.sh` checks for `pkg-config` up front.
+- `build-plugin.sh --with-tests` builds `katexdown-<ver>-macos-arm64.so` and all
+  four test binaries; `envflagstest` runs and passes.
+- `install-macos.sh` was driven end-to-end against a synthesized `Kate.app`
+  (the Craft stub plus the Qt/KF6 libraries a real Kate ships) with the real
+  `macdeployqt`, `otool`, `install_name_tool`, `codesign` and `codesign
+  --verify --deep --strict`: the guards pass, macdeployqt deploys
+  WebEngine/Channel/Positioning and rewrites the plugin's references to
+  `@loader_path/../../../Frameworks/...`, the manifest is written, the bundle
+  re-signs and verifies, and `--uninstall --purge` removes the payload and
+  leaves a bundle that still verifies. That run found and fixed the
+  `_CodeSignature` uninstall bug (see the Pitfalls in
+  `design/macos-install.md`).
+- `packaging/macos/test-install-macos.sh` passes on macOS as well as Linux
+  (59 checks); it now covers the `_CodeSignature` removal too.
 
-**NOT verified on macOS (first CI run is the check).** Everything that needs the
-real tools or a real Kate:
+**NOT verified (needs a real Kate and a working Chromium):**
 
-1. `build-kf6.sh` source build — the exact list/flags, and `kauth`'s backend on
-   macOS (`-DENABLE_KAUTH` is on by default for KTextEditor on non-Windows).
-2. `macdeployqt` actually deploying WebEngine/Channel/Positioning into Kate and
-   the closure pass producing a plugin with no external references.
-3. `codesign` with the entitlements: whether `--deep --options runtime` succeeds
-   on this bundle, and whether the bottom-up fallback verifies.
-4. Whether Kate actually loads the plugin after the ad-hoc signature — launch
-   Kate with `--doctor` first if the plugin does not appear.
-5. The render test with `DYLD_FRAMEWORK_PATH`/`QT_PLUGIN_PATH`: dyld searches
-   `DYLD_FRAMEWORK_PATH`/`DYLD_LIBRARY_PATH` *before* a dependency's install
-   name, so it should override both `@rpath` and absolute Homebrew paths for
-   every framework Kate ships — but confirm that Kate's deployed Qt frameworks
-   keep the versioned `Versions/A` layout that match (a flat framework would not
-   match the install-name form and dyld would fall back to Homebrew), and that
-   `QtWebEngineProcess.app` + `icudtl.dat`/`.pak` are found when the binary is
-   not `kate` itself. The workflow also sets
-   `QTWEBENGINE_RESOURCES_PATH`/`QTWEBENGINE_LOCALES_PATH` to Kate's copies as a
-   belt-and-braces measure.
-6. The Homebrew cask (above) and the uninstall-script staging question.
-7. Intel: no path at all yet (Method 1b in design/macos-install.md).
+1. The CI end-to-end on a real Kate dmg: `macdeployqt` deploying into the real
+   bundle, `codesign`, and whether Kate then loads the plugin after the ad-hoc
+   signature. This sandbox blocks `hdiutil attach` and even a minimal
+   `QWebEngineView` segfaults, so the render test cannot run here; the CI job is
+   the check. (`install-macos.sh --doctor` reports each precondition if the
+   plugin does not appear.)
+2. The render test's `DYLD_FRAMEWORK_PATH`/`QT_PLUGIN_PATH` override: dyld
+   searches those *before* a dependency's install name, so it should override
+   both `@rpath` and absolute Homebrew paths for every framework Kate ships —
+   but confirm Kate's deployed frameworks keep the versioned `Versions/A` layout
+   and that `QtWebEngineProcess.app` + `icudtl.dat`/`.pak` are found when the
+   binary is not `kate` itself. The workflow also sets
+   `QTWEBENGINE_RESOURCES_PATH`/`QTWEBENGINE_LOCALES_PATH`, pointed at the
+   framework's `Resources` directory that `macdeployqt` actually populated
+   (a hardcoded `Contents/Resources` has no WebEngine data).
+3. The Homebrew cask (above) and the uninstall-script staging question.
+4. Intel: no path at all yet (Method 1b in design/macos-install.md).
 
-When these are checked on a Mac, update this section and the "untested" notes at
-the top of `install-macos.sh` / the workflow.
+When these are checked on a Mac with a real Kate, update this section.

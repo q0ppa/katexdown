@@ -116,7 +116,7 @@ jobs:
       - name: install build dependencies
         run: |
           set -Eeuo pipefail
-          brew install cmake ninja qt gettext bison
+          brew install cmake ninja pkgconf qt gettext bison
 
       # KF6 is not shipped by Homebrew, so it is source-built. Cache the prefix by pinned KF6
       # version + pinned Qt minor + runner arch: anything else and the cached frameworks would
@@ -271,8 +271,18 @@ jobs:
           export DYLD_FALLBACK_FRAMEWORK_PATH="$qt_prefix/lib"
           export DYLD_FALLBACK_LIBRARY_PATH="$qt_prefix/lib"
           export QT_PLUGIN_PATH="$kate/Contents/PlugIns:$qtbase_prefix/share/qt/plugins:$qtbase_prefix/lib/qt6/plugins"
-          export QTWEBENGINE_RESOURCES_PATH="$kate/Contents/Resources"
-          export QTWEBENGINE_LOCALES_PATH="$kate/Contents/Resources/qtwebengine_locales"
+          # macdeployqt keeps WebEngine's data inside the deployed framework
+          # (Contents/Frameworks/QtWebEngineCore.framework/Versions/A/Resources), not in
+          # Contents/Resources. Point the test at wherever the .pak actually landed; a hardcoded
+          # Contents/Resources would hand Chromium a directory with no resources.
+          webengine_res="$(find "$kate" -name 'qtwebengine_resources.pak' -print -quit 2>/dev/null || true)"
+          if [ -z "$webengine_res" ]; then
+            echo "::error::qtwebengine_resources.pak is not inside the patched Kate; WebEngine cannot start"
+            exit 1
+          fi
+          webengine_res="$(dirname "$webengine_res")"
+          export QTWEBENGINE_RESOURCES_PATH="$webengine_res"
+          export QTWEBENGINE_LOCALES_PATH="$webengine_res/qtwebengine_locales"
           export QT_QPA_PLATFORM=offscreen
           export QTWEBENGINE_CHROMIUM_FLAGS='--disable-gpu --no-sandbox'
           export KATEXDOWN_DATA_DIR="$GITHUB_WORKSPACE/runtime"

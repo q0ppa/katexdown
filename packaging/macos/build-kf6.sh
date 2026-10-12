@@ -33,6 +33,10 @@
 #   CMAKE_DISABLE_FIND_PACKAGE_KF6DocTools=ON - see above (docs only).
 #   USE_BreezeIcons=OFF   - see above.
 #   BUILD_DESIGNERPLUGIN=OFF - KIO's Qt Designer plugin is dead weight for a headless build.
+#   KDE_INSTALL_BUNDLEDIR  - ECM defaults this to the absolute /Applications/KDE on macOS, so
+#                           KTextEditor's install of its ktexteditor-script-tester .app tries to
+#                           write there (outside the prefix and usually not writable) and fails the
+#                           install. Keep bundles inside the prefix like everything else.
 #   CMAKE_OSX_ARCHITECTURES=arm64 - Method 1 is arm64-only (design/macos-install.md).
 #   BISON_EXECUTABLE/FLEX_EXECUTABLE - macOS ships bison 2.3, and Solid (a KIO dependency)
 #                           needs >= 3.0; Homebrew's bison is keg-only, so its path is passed in.
@@ -53,6 +57,21 @@ KATEXDOWN_KF6_VERSION="${KATEXDOWN_KF6_VERSION:-6.30.0}"
 log()  { printf '%s: %s\n' "$PROG" "$*" >&2; }
 warn() { printf '%s: warning: %s\n' "$PROG" "$*" >&2; }
 die()  { printf '%s: error: %s\n' "$PROG" "$*" >&2; exit 1; }
+
+# Surface the real failure from a build log. Parallel ninja interleaves other translation units'
+# warnings *after* the error line, so a plain `tail` can show nothing but warnings (the first
+# macOS CI run mis-reported a ktexteditor failure exactly that way). Print the error/linker lines
+# first, then the tail for surrounding context.
+report_log_failure() { # $1 log_file
+    local log_file="$1" hits
+    hits="$(grep -n -i -A6 -E 'error:|fatal error:|undefined (symbol|reference)|ld: |duplicate symbol|CMake Error' "$log_file" 2>/dev/null | tail -n 60 || true)"
+    if [ -n "$hits" ]; then
+        printf '%s: --- error lines in %s ---\n' "$PROG" "$log_file" >&2
+        printf '%s\n' "$hits" >&2
+    fi
+    printf '%s: --- tail of %s ---\n' "$PROG" "$log_file" >&2
+    tail -n 30 "$log_file" >&2 || true
+}
 
 usage() {
     cat <<EOF
@@ -90,7 +109,7 @@ find_brew() {
     elif [ -x /opt/homebrew/bin/brew ]; then
         b="/opt/homebrew/bin/brew"
     fi
-    [ -n "$b" ] || die "Homebrew not found; run 'brew install cmake ninja qt gettext bison' first"
+    [ -n "$b" ] || die "Homebrew not found; run 'brew install cmake ninja pkgconf qt gettext bison' first"
     printf '%s' "$b"
 }
 
@@ -165,18 +184,19 @@ build_one() { # $1 repo, $2 version, $3 prefix, $4 qt_prefix, $5 cache_dir, $6 j
             -DBUILD_DESIGNERPLUGIN=OFF \
             -DCMAKE_DISABLE_FIND_PACKAGE_KF6DocTools=ON \
             -DUSE_BreezeIcons=OFF \
+            -DKDE_INSTALL_BUNDLEDIR="$prefix/Applications" \
             -DBISON_EXECUTABLE="$KF6_BISON_EXE" \
             -DFLEX_EXECUTABLE="$KF6_FLEX_EXE" \
             > "$log_file" 2>&1; then
-        tail -n 40 "$log_file" >&2 || true
+        report_log_failure "$log_file"
         die "$repo: cmake configure failed (full log: $log_file)"
     fi
     if ! cmake --build "$build_dir" --parallel "$jobs" >> "$log_file" 2>&1; then
-        tail -n 60 "$log_file" >&2 || true
+        report_log_failure "$log_file"
         die "$repo: build failed (full log: $log_file)"
     fi
     if ! cmake --install "$build_dir" >> "$log_file" 2>&1; then
-        tail -n 60 "$log_file" >&2 || true
+        report_log_failure "$log_file"
         die "$repo: install failed (full log: $log_file)"
     fi
 }
@@ -206,6 +226,9 @@ main() {
 
     command -v cmake >/dev/null 2>&1 || die "cmake not found; run 'brew install cmake ninja'"
     command -v ninja >/dev/null 2>&1 || die "ninja not found; run 'brew install cmake ninja'"
+    # KArchive's configure does a required find_package(PkgConfig); without the executable the
+    # configure fails with a wall of FindPkgConfig output. Homebrew's is 'pkgconf'.
+    command -v pkg-config >/dev/null 2>&1 || die "pkg-config not found; run 'brew install pkgconf' (KArchive's configure requires it)"
     command -v msgfmt >/dev/null 2>&1 || warn "msgfmt not found; some frameworks' translations may fail. Install gettext: 'brew install gettext'"
 
     local brew qt_prefix
