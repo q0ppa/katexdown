@@ -1,0 +1,47 @@
+# Maintainer: katexdown contributors
+#
+# TESTING ONLY — this recipe follows the published Vim-navigation branch.
+# It is intentionally separate from ../PKGBUILD, whose local git+file source
+# and working-tree overlay are useful for development. This recipe is not an
+# AUR submission and is not published by the repository's AUR workflow.
+#
+# Build from a checkout of the recipe:
+#   cd katexdown/aur/testing
+#   makepkg -C -f -si
+
+pkgname=katexdown-testing-git
+_pkgbase=katexdown
+pkgver=0.3.6.r0.gtesting
+pkgrel=1
+pkgdesc="TESTING: Markdown preview side panel for Kate with Vim-style reading navigation"
+arch=('x86_64')
+url="https://github.com/FilthyS/katexdown/tree/testing/vim-navigation"
+license=('GPL-3.0-or-later')
+depends=('ktexteditor' 'syntax-highlighting' 'kxmlgui' 'kconfig' 'ki18n' 'kcoreaddons' 'qt6-base' 'qt6-webchannel' 'qt6-webengine')
+makedepends=('git' 'cmake' 'extra-cmake-modules')
+# The plugin installs the same kf6/ktexteditor/katexdown plugin file as the
+# stable local package. Do not allow both package names to be installed.
+provides=('katexdown')
+conflicts=('katexdown' 'katexdown-git')
+source=("$_pkgbase::git+https://github.com/FilthyS/katexdown.git#branch=testing/vim-navigation")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$srcdir/$_pkgbase"
+  # The repository currently has no version tags. Keep the package version
+  # tied to the project version and make every branch commit distinguishable.
+  printf '0.3.6.r%s.%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+  cd "$srcdir/$_pkgbase"
+  cmake -B build -S . \
+    -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+    -DCMAKE_INSTALL_PREFIX=/usr
+  cmake --build build
+}
+
+package() {
+  cd "$srcdir/$_pkgbase"
+  DESTDIR="$pkgdir" cmake --install build
+}

@@ -56,7 +56,7 @@ jobs:
           set -Eeuo pipefail
           pacman -Syu --noconfirm
           pacman -S --noconfirm --needed git cmake ninja extra-cmake-modules \
-            ktexteditor syntax-highlighting kxmlgui kconfig ki18n kcoreaddons qt6-base qt6-webengine
+            ktexteditor syntax-highlighting kxmlgui kconfig ki18n kcoreaddons qt6-base qt6-webchannel qt6-webengine
 
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
 

@@ -13,8 +13,8 @@ class QSpinBox;
 /**
  * Settings page shown under Kate's plugin configuration: choose between GitHub
  * colors and the active editor/system theme, plus the GitHub light/dark
- * variant, custom stylesheets, remote media, and which heading levels the
- * floating section outline in the preview recognizes.
+ * variant, custom stylesheets, remote media, reading navigation, and which
+ * heading levels the floating section outline in the preview recognizes.
  */
 class ConfigPage : public KTextEditor::ConfigPage
 {
@@ -48,6 +48,7 @@ private:
     QSpinBox *m_v8Cap = nullptr;
     QCheckBox *m_githubCss = nullptr;
     QCheckBox *m_codeCopy = nullptr;
+    QCheckBox *m_vimReading = nullptr;
     QCheckBox *m_remoteMedia = nullptr;
     // Heading level 1..6 -> index 0..5.
     QCheckBox *m_tocLevel[6] = {};

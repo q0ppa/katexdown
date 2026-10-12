@@ -158,6 +158,19 @@ ConfigPage::ConfigPage(QWidget *parent)
                                 " It is part of the page, so it is included in (or left out of) exported HTML too."));
     form->addRow(QString(), m_codeCopy);
 
+    m_vimReading = new QCheckBox(i18n("Enable Vim-style preview reading navigation"), this);
+    m_vimReading->setToolTip(i18n("While the preview has focus: j/k scroll, n/p move by an overlapping page, and h/l scroll horizontally."));
+    form->addRow(QString(), m_vimReading);
+    auto *vimHint = new QLabel(
+        i18n("Off by default. With this enabled, j/k scroll in small steps, n/p move by an overlapping "
+             "viewport page, and h/l scroll horizontally (nested code/table containers are preferred). "
+             "Ctrl+h/j/k/l moves focus between the editor and preview using their actual positions. "
+             "These Ctrl bindings take precedence over Kate actions with the same shortcuts while either pane has focus."),
+        this);
+    vimHint->setWordWrap(true);
+    vimHint->setEnabled(false);
+    form->addRow(QString(), vimHint);
+
     // Floating section outline: which heading levels it lists (H1-H5 default).
     auto *tocRowHost = new QWidget(this);
     auto *tocRow = new QHBoxLayout(tocRowHost);
@@ -264,6 +277,7 @@ ConfigPage::ConfigPage(QWidget *parent)
     connect(m_remoteMedia, &QCheckBox::toggled, this, [this]() { Q_EMIT changed(); });
     connect(m_githubCss, &QCheckBox::toggled, this, [this]() { Q_EMIT changed(); });
     connect(m_codeCopy, &QCheckBox::toggled, this, [this]() { Q_EMIT changed(); });
+    connect(m_vimReading, &QCheckBox::toggled, this, [this]() { Q_EMIT changed(); });
     connect(m_mode, &QComboBox::currentIndexChanged, this, [this]() {
         syncEnabled();
         Q_EMIT changed();
@@ -404,6 +418,7 @@ void ConfigPage::apply()
     s->setLoadRemoteMedia(m_remoteMedia->isChecked());
     s->setUseGithubCss(m_githubCss->isChecked());
     s->setCodeCopyButton(m_codeCopy->isChecked());
+    s->setVimReadingNavigation(m_vimReading->isChecked());
     s->setLoadingMode(static_cast<Settings::LoadingMode>(m_loading->currentData().toInt()));
     s->setImageMode(static_cast<Settings::ImageMode>(m_imageMode->currentData().toInt()));
     s->setImageReclaim(static_cast<Settings::ImageReclaim>(m_imageReclaim->currentData().toInt()));
@@ -430,6 +445,7 @@ void ConfigPage::reset()
     m_remoteMedia->setChecked(s->loadRemoteMedia());
     m_githubCss->setChecked(s->useGithubCss());
     m_codeCopy->setChecked(s->codeCopyButton());
+    m_vimReading->setChecked(s->vimReadingNavigation());
     m_loading->setCurrentIndex(m_loading->findData(s->loadingMode()));
     m_imageMode->setCurrentIndex(m_imageMode->findData(s->imageMode()));
     m_imageReclaim->setCurrentIndex(m_imageReclaim->findData(s->imageReclaim()));
@@ -453,6 +469,7 @@ void ConfigPage::defaults()
     m_remoteMedia->setChecked(false);
     m_githubCss->setChecked(true);
     m_codeCopy->setChecked(true);
+    m_vimReading->setChecked(false);
     m_loading->setCurrentIndex(m_loading->findData(Settings::LazyKeep));
     m_imageMode->setCurrentIndex(m_imageMode->findData(Settings::Adaptive));
     m_imageReclaim->setCurrentIndex(m_imageReclaim->findData(Settings::MinimizedOnly));

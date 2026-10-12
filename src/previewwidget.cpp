@@ -478,6 +478,12 @@ PreviewWidget::PreviewWidget(KTextEditor::MainWindow *mainWindow, KTextEditor::V
     m_profile->setUrlRequestInterceptor(guard);
 
     m_web = new QWebEngineView(this);
+    // PreviewWidget remains the pane geometry used by PluginView, while focus
+    // must enter the WebEngine view (and, once created, its render-widget
+    // proxy). Keep both the Qt focus-proxy route and the explicit helper below
+    // so callers never need to know the WebEngine child hierarchy.
+    setFocusPolicy(Qt::StrongFocus);
+    setFocusProxy(m_web);
     auto *page = new PreviewPage(m_profile, m_web);
     page->onLinkActivated = [this](const QUrl &url) {
         openLink(url);
@@ -488,6 +494,11 @@ PreviewWidget::PreviewWidget(KTextEditor::MainWindow *mainWindow, KTextEditor::V
     // (see buildHtml); the bridge itself survives.
     auto *channel = new QWebChannel(page);
     channel->registerObject(QStringLiteral("kdxClipboard"), new ClipboardBridge(channel));
+    auto *navigationBridge = new DirectionalNavigationBridge(channel);
+    connect(navigationBridge, &DirectionalNavigationBridge::directionRequested, this, [this](int key) {
+        Q_EMIT directionalFocusRequested(static_cast<Qt::Key>(key));
+    });
+    channel->registerObject(QStringLiteral("kdxNavigation"), navigationBridge);
     page->setWebChannel(channel);
     // A Markdown reader does not use Chromium's interactive feature surface;
     // disabling it trims the renderer's GPU/compositor-side memory and raster
@@ -622,6 +633,7 @@ PreviewWidget::PreviewWidget(KTextEditor::MainWindow *mainWindow, KTextEditor::V
         // Set the copy-button policy before the first render, so a disabled
         // button is never decorated in the first place (no visible flash).
         applyCodeCopy();
+        applyReadingNavigation();
         render();
         applyOutlineSettings();
         if (!m_pendingExportPath.isEmpty()) {
@@ -645,6 +657,7 @@ PreviewWidget::PreviewWidget(KTextEditor::MainWindow *mainWindow, KTextEditor::V
     connect(Settings::self(), &Settings::changed, this, &PreviewWidget::applyOutlineSettings);
     connect(Settings::self(), &Settings::changed, this, &PreviewWidget::applyImageMode);
     connect(Settings::self(), &Settings::changed, this, &PreviewWidget::applyCodeCopy);
+    connect(Settings::self(), &Settings::changed, this, &PreviewWidget::applyReadingNavigation);
 
     setWindowIcon(QIcon::fromTheme(QStringLiteral("text-markdown")));
     applyMediaPolicy();
@@ -1103,6 +1116,15 @@ void PreviewWidget::applyCodeCopy()
               .arg(Settings::self()->codeCopyButton() ? QStringLiteral("true") : QStringLiteral("false")));
 }
 
+void PreviewWidget::applyReadingNavigation()
+{
+    if (!m_loaded) {
+        return;
+    }
+    runJs(QStringLiteral("window.__setReadingNavigation(%1);")
+              .arg(Settings::self()->vimReadingNavigation() ? QStringLiteral("true") : QStringLiteral("false")));
+}
+
 void PreviewWidget::render()
 {
     if (!m_loaded) {
@@ -1219,6 +1241,26 @@ void PreviewWidget::panelOpened()
         m_web->page()->setLifecycleState(QWebEnginePage::LifecycleState::Active);
     }
     noteActivity();
+}
+
+bool PreviewWidget::focusContent(Qt::FocusReason reason)
+{
+    if (!m_web || !isVisible() || !m_web->isVisible() || !m_web->isEnabled()) {
+        return false;
+    }
+
+    // Do not cache the proxy: QtWebEngine creates/replaces it lazily around
+    // navigation. Calling setFocus on the view lets Qt choose the current
+    // proxy; the fallback handles versions where that first call stops at the
+    // QWebEngineView itself.
+    m_web->setFocus(reason);
+    if (!webHasFocus()) {
+        if (QWidget *proxy = m_web->focusProxy()) {
+            proxy->setFocus(reason);
+        }
+    }
+    installInputFilter();
+    return webHasFocus();
 }
 
 // One policy tick, every second. While the panel is closed it walks the
@@ -1765,6 +1807,7 @@ bool PreviewWidget::eventFilter(QObject *obj, QEvent *event)
         case QEvent::ShortcutOverride:
         case QEvent::KeyPress:
         case QEvent::KeyRelease:
+        case QEvent::FocusIn:
             break;
         default:
             return QWidget::eventFilter(obj, event);
@@ -1855,6 +1898,18 @@ bool PreviewWidget::previewHandlesKey(QKeyEvent *event) const
     if (mods == Qt::ControlModifier && (key == Qt::Key_C || key == Qt::Key_Insert || key == Qt::Key_A)) {
         return true;
     }
+    // Ctrl+h/j/k/l is claimed from Kate's shortcut map, but the page must see
+    // the actual KeyPress. Its DOM keydown handler exempts editable controls
+    // synchronously and invokes kdxNavigation for normal page focus.
+    if (Settings::self()->vimReadingNavigation() && mods == Qt::ControlModifier
+        && (key == Qt::Key_H || key == Qt::Key_J || key == Qt::Key_K || key == Qt::Key_L)) {
+        return true;
+    }
+    if (Settings::self()->vimReadingNavigation() && mods == Qt::NoModifier
+        && (key == Qt::Key_H || key == Qt::Key_J || key == Qt::Key_K || key == Qt::Key_L || key == Qt::Key_N
+            || key == Qt::Key_P)) {
+        return true;
+    }
     return false;
 }
 
@@ -1885,6 +1940,8 @@ bool PreviewWidget::forwardKeyEvent(QKeyEvent *event)
         }
         return false;
     }
+    // Leave Ctrl+h/j/k/l in the web view. preview.js performs the reliable
+    // event-target check and then calls the QWebChannel bridge.
     // Scrolling/navigation and Select All are the web view's.
     return false;
 }

@@ -7,8 +7,9 @@
 #   cd katexdown/aur
 #   makepkg -si
 #
-# If you publish the fork on GitHub later, point `url` at your repository and
-# this PKGBUILD can be submitted to the AUR as-is (name: katexdown-git).
+# This is the repository-local build flow. The separately maintained
+# `aur/testing/PKGBUILD` is the explicit GitHub-branch recipe for testing; this
+# file deliberately keeps the working-tree overlay for local development.
 
 pkgname=katexdown-git
 _pkgbase=katexdown
@@ -18,7 +19,7 @@ pkgdesc="Markdown preview side panel for Kate with KaTeX math and custom CSS (ka
 arch=('x86_64')
 url="https://github.com/q0ppa/katexdown"
 license=('GPL-3.0-or-later')
-depends=('ktexteditor' 'syntax-highlighting' 'kxmlgui' 'kconfig' 'ki18n' 'kcoreaddons' 'qt6-base' 'qt6-webengine')
+depends=('ktexteditor' 'syntax-highlighting' 'kxmlgui' 'kconfig' 'ki18n' 'kcoreaddons' 'qt6-base' 'qt6-webchannel' 'qt6-webengine')
 makedepends=('git' 'cmake' 'extra-cmake-modules')
 provides=('katexdown')
 conflicts=('katexdown')

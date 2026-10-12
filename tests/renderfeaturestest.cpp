@@ -15,6 +15,7 @@
 #include <QFile>
 #include <QImage>
 #include <QKeyEvent>
+#include <QSignalSpy>
 #include <QStringList>
 #include <QWidget>
 #include <QTemporaryDir>
@@ -112,12 +113,16 @@ private Q_SLOTS:
     void selectionCopyShapesPlainText();
     void selectionCopyOfMathKeepsTheLatex();
     void ctrlCCopiesSelectionToClipboard();
+    void readingNavigationScrollsAndRespectsEditableControls();
+    void ctrlNavigationUsesLiveDomFocusAcrossRender();
+    void readingNavigationSettingPersistsAndUpdates();
     void previewClaimsItsKeysFromTheShortcutMap();
     void imageModesControlDecoding();
     void parkingPreservesTheImageBox();
     void rememberedImageBoxesShapeAFreshReload();
     void relativeCssResolvesAgainstDataDir();
     void outlineListsConfiguredHeadings();
+    void outlineButtonTracksTheme();
     void fragmentLinksJumpToSections();
     void enginesAreLoadedOnlyWhenTheTextNeedsThem();
     void numberMathLoadsKatexEngine();
@@ -459,6 +464,7 @@ void RenderFeaturesTest::selectionCopyOfMathKeepsTheLatex()
 // because it bypasses the shortcut map — so this asserts the claim directly.
 void RenderFeaturesTest::previewClaimsItsKeysFromTheShortcutMap()
 {
+    Settings::self()->setVimReadingNavigation(true);
     KTextEditor::Document *doc = openDocument(QStringLiteral("# Title 1\n\nHello world.\n"));
     auto preview = makePreview(doc);
     QVERIFY(waitForPageText(preview.get(), QLatin1String("Hello world")));
@@ -482,6 +488,9 @@ void RenderFeaturesTest::previewClaimsItsKeysFromTheShortcutMap()
         QCoreApplication::sendEvent(proxy, &ovr);
         return ovr.isAccepted();
     };
+    Settings::self()->setVimReadingNavigation(false);
+    QVERIFY(!overrideAccepted(Qt::Key_J, Qt::NoModifier));
+    Settings::self()->setVimReadingNavigation(true);
     // The keys the preview owns (copy, select all, reading keys) are claimed.
     QVERIFY(overrideAccepted(Qt::Key_C, Qt::ControlModifier));
     QVERIFY(overrideAccepted(Qt::Key_Insert, Qt::ControlModifier));
@@ -492,6 +501,183 @@ void RenderFeaturesTest::previewClaimsItsKeysFromTheShortcutMap()
     // still gets it.
     QVERIFY(!overrideAccepted(Qt::Key_B, Qt::ControlModifier));
 
+    Settings::self()->setVimReadingNavigation(false);
+    delete doc;
+}
+
+void RenderFeaturesTest::readingNavigationSettingPersistsAndUpdates()
+{
+    Settings *settings = Settings::self();
+    settings->setVimReadingNavigation(false);
+    QCOMPARE(settings->vimReadingNavigation(), false);
+    settings->setVimReadingNavigation(true);
+    QCOMPARE(settings->vimReadingNavigation(), true);
+    settings->load();
+    QCOMPARE(settings->vimReadingNavigation(), true);
+    settings->setVimReadingNavigation(false);
+    settings->load();
+    QCOMPARE(settings->vimReadingNavigation(), false);
+}
+
+void RenderFeaturesTest::readingNavigationScrollsAndRespectsEditableControls()
+{
+    QString text = QStringLiteral("# Reading\n\n");
+    for (int i = 0; i < 160; ++i) {
+        text += QStringLiteral("line %1 — reading content\n\n").arg(i);
+    }
+    KTextEditor::Document *doc = openDocument(text);
+    auto preview = makePreview(doc);
+    QVERIFY(waitForPageText(preview.get(), QLatin1String("line 100")));
+    preview->show();
+    auto *view = preview->findChild<QWebEngineView *>();
+    QVERIFY(view);
+    QWidget *proxy = nullptr;
+    QDeadlineTimer deadline(10000);
+    while (!deadline.hasExpired() && !(proxy = view->focusProxy())) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    }
+    QVERIFY(proxy);
+    proxy->setFocus();
+    QCOMPARE(evalJs(preview.get(), QStringLiteral("window.scrollTo(0, 0); window.scrollY")), QStringLiteral("0"));
+
+    // The live setting update reaches an already loaded page without reload.
+    Settings::self()->setVimReadingNavigation(false);
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
+    QTest::keyClick(proxy, Qt::Key_J, Qt::NoModifier);
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
+    QCOMPARE(evalJs(preview.get(), QStringLiteral("String(window.scrollY)")), QStringLiteral("0"));
+    Settings::self()->setVimReadingNavigation(true);
+
+    const double afterJ = evalJs(
+                              preview.get(),
+                              QStringLiteral(
+                                  "document.dispatchEvent(new KeyboardEvent('keydown',{key:'j',bubbles:true}));"
+                                  "String(window.scrollY)"))
+                              .toDouble();
+    QVERIFY(afterJ > 0);
+    const double repeated = evalJs(
+                                preview.get(),
+                                QStringLiteral(
+                                    "window.scrollTo(0, 0);"
+                                    "document.dispatchEvent(new KeyboardEvent('keydown',{key:'j',repeat:true,bubbles:true}));"
+                                    "document.dispatchEvent(new KeyboardEvent('keydown',{key:'j',repeat:true,bubbles:true}));"
+                                    "String(window.scrollY)"))
+                                .toDouble();
+    QVERIFY(repeated > 40);
+    // Exercise the page's repeat-friendly listener for the page-sized and
+    // reverse commands as well (headless WebEngine only forwards the first
+    // synthetic native key after a focus handoff).
+    const double afterN = evalJs(
+                             preview.get(),
+                             QStringLiteral(
+                                 "window.scrollTo(0, 0);"
+                                 "document.dispatchEvent(new KeyboardEvent('keydown',{key:'n',bubbles:true}));"
+                                 "String(window.scrollY)"))
+                             .toDouble();
+    QVERIFY(afterN > 0);
+    const double afterK = evalJs(
+                             preview.get(),
+                             QStringLiteral(
+                                 "document.dispatchEvent(new KeyboardEvent('keydown',{key:'k',bubbles:true}));"
+                                 "String(window.scrollY)"))
+                             .toDouble();
+    QVERIFY(afterK < afterN);
+
+    const double nestedHorizontal = evalJs(
+                                        preview.get(),
+                                        QStringLiteral(
+                                            "(function(){var box=document.createElement('div');"
+                                            "box.id='kdx-horizontal';"
+                                            "box.style='width:80px;height:20px;overflow-x:auto;white-space:nowrap';"
+                                            "var inner=document.createElement('span');"
+                                            "inner.style='display:inline-block;width:500px';"
+                                            "inner.textContent='wide nested code/table container';"
+                                            "box.appendChild(inner); document.getElementById('content').appendChild(box);"
+                                            "box.dispatchEvent(new MouseEvent('mousemove',{bubbles:true}));"
+                                            "box.dispatchEvent(new KeyboardEvent('keydown',{key:'l',bubbles:true}));"
+                                            "return String(box.scrollLeft);})()"))
+                                        .toDouble();
+    QVERIFY(nestedHorizontal > 0);
+
+    // Re-render replaces the hovered node. h/l must use the new live focused
+    // target even though no mousemove was delivered after that replacement.
+    doc->setText(text + QStringLiteral("\nupdated after render\n"));
+    QVERIFY(waitForPageText(preview.get(), QLatin1String("updated after render")));
+    const double afterRenderHorizontal = evalJs(
+                                             preview.get(),
+                                             QStringLiteral(
+                                                 "(function(){var box=document.createElement('div');"
+                                                 "box.style='width:80px;height:20px;overflow-x:auto;white-space:nowrap';"
+                                                 "var inner=document.createElement('span');"
+                                                 "inner.style='display:inline-block;width:500px';"
+                                                 "box.appendChild(inner); document.getElementById('content').appendChild(box);"
+                                                 "box.focus(); box.dispatchEvent(new KeyboardEvent('keydown',{key:'l',bubbles:true}));"
+                                                 "return String(box.scrollLeft);})()"))
+                                             .toDouble();
+    QVERIFY(afterRenderHorizontal > 0);
+
+    // The page-side handler leaves editable controls alone.
+    QCOMPARE(evalJs(preview.get(),
+                    QStringLiteral(
+                        "(function(){var t=document.createElement('textarea');"
+                        "t.id='kdx-test-editor'; t.value='type here';"
+                        "document.getElementById('content').appendChild(t); t.focus();"
+                        "window.scrollTo(0, 0); return document.activeElement.tagName;})()")),
+             QStringLiteral("TEXTAREA"));
+    QCOMPARE(evalJs(preview.get(),
+                    QStringLiteral(
+                        "var e=document.getElementById('kdx-test-editor');"
+                        "e.dispatchEvent(new KeyboardEvent('keydown',{key:'j',bubbles:true}));"
+                        "String(window.scrollY)")),
+             QStringLiteral("0"));
+
+    Settings::self()->setVimReadingNavigation(false);
+    delete doc;
+}
+
+void RenderFeaturesTest::ctrlNavigationUsesLiveDomFocusAcrossRender()
+{
+    Settings::self()->setVimReadingNavigation(true);
+    auto *doc = openDocument(QStringLiteral("# focus\n\nbody\n"));
+    auto preview = makePreview(doc);
+    QVERIFY(waitForPageText(preview.get(), QLatin1String("body")));
+    QSignalSpy directional(preview.get(), &PreviewWidget::directionalFocusRequested);
+
+    // The DOM makes the exemption at the event target, not through a cached
+    // asynchronous activeElement value in Qt.
+    QCOMPARE(evalJs(preview.get(),
+                    QStringLiteral(
+                        "(function(){var t=document.createElement('textarea');"
+                        "t.id='kdx-live-focus'; document.body.appendChild(t); t.focus();"
+                        "t.dispatchEvent(new KeyboardEvent('keydown',{key:'h',ctrlKey:true,bubbles:true}));"
+                        "return document.activeElement.id;})()")),
+             QStringLiteral("kdx-live-focus"));
+    QTest::qWait(100);
+    QCOMPARE(directional.count(), 0);
+
+    // Programmatic focus on normal page content is routed through the bridge.
+    QCOMPARE(evalJs(preview.get(),
+                    QStringLiteral(
+                        "document.body.focus();"
+                        "document.dispatchEvent(new KeyboardEvent('keydown',{key:'l',ctrlKey:true,bubbles:true}));"
+                        "'sent'")),
+             QStringLiteral("sent"));
+    QTRY_COMPARE(directional.count(), 1);
+
+    // A render replaces the DOM. The next normal-page request still routes,
+    // without an old callback or detached target deciding ownership.
+    doc->setText(QStringLiteral("# focus after reload\n\nnew body\n"));
+    QVERIFY(waitForPageText(preview.get(), QLatin1String("new body")));
+    directional.clear();
+    QCOMPARE(evalJs(preview.get(),
+                    QStringLiteral(
+                        "document.body.focus();"
+                        "document.dispatchEvent(new KeyboardEvent('keydown',{key:'h',ctrlKey:true,bubbles:true}));"
+                        "'sent'")),
+             QStringLiteral("sent"));
+    QTRY_COMPARE(directional.count(), 1);
+
+    Settings::self()->setVimReadingNavigation(false);
     delete doc;
 }
 
@@ -845,6 +1031,42 @@ void RenderFeaturesTest::relativeCssResolvesAgainstDataDir()
     QCOMPARE(maxWidth, QStringLiteral("333px"));
 
     delete doc;
+}
+
+void RenderFeaturesTest::outlineButtonTracksTheme()
+{
+    Settings *settings = Settings::self();
+    const Settings::Mode oldMode = settings->mode();
+    const Settings::GhVariant oldVariant = settings->ghVariant();
+    settings->setMode(Settings::GitHub);
+    settings->setGhVariant(Settings::Light);
+
+    KTextEditor::Document *doc = openDocument(QStringLiteral("# Theme\n\nbody\n"));
+    auto preview = makePreview(doc);
+    QVERIFY(waitForPageText(preview.get(), QLatin1String("body")));
+    QVERIFY(waitForCond(preview.get(),
+                        QStringLiteral(
+                            "(function(){var b=document.getElementById('kdx-outline-btn');"
+                            "return b && getComputedStyle(b).display !== 'none' ? 'ready' : 'waiting';})()"),
+                        QStringLiteral("ready")));
+
+    const QString colors = QStringLiteral(
+        "(function(){var b=document.getElementById('kdx-outline-btn');"
+        "var p=b.querySelector('path');"
+        "return getComputedStyle(b).color+'|'+getComputedStyle(p).fill;})()");
+    QCOMPARE(evalJs(preview.get(), colors), QStringLiteral("rgb(31, 35, 40)|rgb(31, 35, 40)"));
+
+    settings->setGhVariant(Settings::Dark);
+    QVERIFY(waitForCond(preview.get(), colors, QStringLiteral("rgb(240, 246, 252)|rgb(240, 246, 252)")));
+
+    // Theme changes are live on an existing page, not only correct on its
+    // initial render.
+    settings->setGhVariant(Settings::Light);
+    QVERIFY(waitForCond(preview.get(), colors, QStringLiteral("rgb(31, 35, 40)|rgb(31, 35, 40)")));
+
+    delete doc;
+    settings->setGhVariant(oldVariant);
+    settings->setMode(oldMode);
 }
 
 // The floating section-outline control lists exactly the heading levels the
