@@ -1,0 +1,318 @@
+# Build the macOS plugin (the thin .so) and verify it against a REAL Kate install.
+#
+# Why the shape is what it is (mirrors .github/workflows/windows.yml):
+#   * Kate for macOS ships no Qt WebEngine and is hardened-runtime signed without
+#     disable-library-validation, so a foreign plugin cannot load until the bundle is re-signed.
+#     The release is therefore tiny: the plugin .so plus install-macos.sh / uninstall-macos.sh,
+#     and the installer borrows the engine from Homebrew. Nothing is built from source except
+#     src/*.cpp, the KF6 closure (no Homebrew KF6 formula exists) and the KF6 cache.
+#   * The plugin is verified against a real KDE Kate dmg from the CDN, never against Homebrew's
+#     complete Qt. That is the whole value of the verify step: a missing QtWebEngineProcess.app or
+#     Chromium data file in Kate would pass any check run against Homebrew's tree.
+#   * The Qt minor of that newest Kate is compared with the pin in install-macos.sh. Kate's plugin
+#     loader compares major.minor and a mismatch fails SILENTLY (the plugin is never listed), so
+#     this failure IS the "Kate moved to a new Qt, rebuild the plugin" canary.
+#   * macos-14/15 are arm64 runners. Intel is deliberately absent: Homebrew publishes no
+#     qt/qtwebengine bottle for x86_64 macOS, so Method 1 has no engine to borrow there
+#     (design/macos-install.md). Uncomment the Intel leg when a bottle (or Method 1b) exists.
+#
+# Why not on every push: one run installs Homebrew Qt and, on a cache miss, source-builds KF6.
+# It runs on tags (to attach the release assets), on changes to the build inputs, and on demand.
+#
+# actions/checkout is SHA-pinned because the tag path runs with a write-scoped GITHUB_TOKEN.
+
+name: macos
+
+on:
+  # No paths filter on the tag trigger: GitHub ANDs branches/tags with paths, so a release tag
+  # landing on a commit that happened not to touch src/ would skip this job and publish a release
+  # with no macOS artifact, silently.
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'data/**'
+      - 'CMakeLists.txt'
+      - 'packaging/macos/**'
+      - '.github/workflows/macos.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  # The KF6 prefix has to be at the same absolute path on a cache hit and a cache miss, because the
+  # built frameworks record it. github.workspace is stable across runs.
+  KATEXDOWN_KF6_PREFIX: ${{ github.workspace }}/.kf6-prefix
+  HOMEBREW_NO_AUTO_UPDATE: '1'
+  HOMEBREW_NO_INSTALL_CLEANUP: '1'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-14
+          # Intel needs either a Homebrew Qt/qtwebengine bottle for x86_64 macOS (there is none
+          # today) or the self-hosted payload of Method 1b. When one exists, uncomment this leg
+          # and relax the arm64-only check below (Intel Homebrew is at /usr/local, and
+          # build-plugin.sh / build-kf6.sh refuse a non-arm64 host today).
+          # - arch: x86_64
+          #   runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 300
+    permissions:
+      contents: write  # only used by the release-upload step, which is tag-gated
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      # Kate ships arm64, and Method 1 borrows an arm64 engine. Check the runner before spending
+      # an hour on a build that can only produce the wrong architecture (a Rosetta shell or a
+      # changed runner image would otherwise fail deep inside macdeployqt).
+      - name: verify the runner is an arm64 Mac with Homebrew
+        if: matrix.arch == 'arm64'
+        run: |
+          set -Eeuo pipefail
+          arch="$(uname -m)"
+          if [ "$arch" != "arm64" ]; then
+            echo "::error::this leg is ${{ matrix.arch }} but the runner reports '$arch'. macos-14/15 must be arm64 runners."
+            exit 1
+          fi
+          prefix="$(brew --prefix)"
+          if [ "$prefix" != "/opt/homebrew" ]; then
+            echo "::error::Homebrew prefix is '$prefix', not /opt/homebrew. That is the Intel Homebrew; this job needs the native arm64 one."
+            exit 1
+          fi
+          echo "arm64 runner, Homebrew at $prefix"
+
+      # The Qt minor and the KF6 version are each pinned in exactly one script; read them instead
+      # of writing a third copy in YAML. Build-plugin refuses to build when Homebrew's Qt minor
+      # differs from the pin, so the cache key and the build always agree.
+      - name: resolve pinned versions
+        run: |
+          set -Eeuo pipefail
+          qt_minor="$(packaging/macos/build-plugin.sh --print-qt-minor)"
+          kf6_version="$(packaging/macos/build-kf6.sh --print-version)"
+          {
+            echo "QT_MINOR=$qt_minor"
+            echo "KF6_VERSION=$kf6_version"
+          } >> "$GITHUB_ENV"
+          echo "pinned Qt minor $qt_minor, KF6 $kf6_version"
+
+      # qt is the full module set the KF6 build needs (qtbase, qtdeclarative, qtspeech, qtsvg,
+      # qttools, qtwebchannel, qtwebengine, qtpositioning). gettext provides msgfmt for the
+      # frameworks' translation installs, and solid (a KIO/KTextEditor dependency) needs bison
+      # >= 3.0 while macOS ships 2.3 - Homebrew's bison is keg-only, which build-kf6.sh handles by
+      # absolute path.
+      - name: install build dependencies
+        run: |
+          set -Eeuo pipefail
+          brew install cmake ninja qt gettext bison
+
+      # KF6 is not shipped by Homebrew, so it is source-built. Cache the prefix by pinned KF6
+      # version + pinned Qt minor + runner arch: anything else and the cached frameworks would
+      # have the wrong ABI. A miss is slow but correct; a partial cache is repaired by
+      # build-kf6.sh, which skips frameworks already present.
+      - name: cache KF6
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        with:
+          path: ${{ env.KATEXDOWN_KF6_PREFIX }}
+          key: kf6-${{ env.KF6_VERSION }}-qt${{ env.QT_MINOR }}-${{ runner.arch }}
+          restore-keys: |
+            kf6-${{ env.KF6_VERSION }}-qt${{ env.QT_MINOR }}-
+
+      # -j3: the standard arm64 macOS runner has 3 vCPUs / 7 GB, and parallel KIO/KTextEditor
+      # link steps are the memory peak. The cache makes this a no-op after the first run.
+      - name: build KF6
+        run: |
+          set -Eeuo pipefail
+          packaging/macos/build-kf6.sh --prefix "$KATEXDOWN_KF6_PREFIX" --jobs 3
+
+      # --with-tests: the verify step needs previewlifecycletest. build-plugin.sh prints the
+      # release .so path on stdout, so the log output (stderr) cannot confuse the capture.
+      - name: build the plugin and the tests
+        run: |
+          set -Eeuo pipefail
+          plugin="$(packaging/macos/build-plugin.sh \
+            --kf6-prefix "$KATEXDOWN_KF6_PREFIX" \
+            --with-tests \
+            --out-dir dist | tail -n 1)"
+          if [ ! -f "$plugin" ]; then
+            echo "::error::build-plugin.sh produced no plugin (got '$plugin')"
+            exit 1
+          fi
+          echo "PLUGIN_SO=$plugin" >> "$GITHUB_ENV"
+          echo "built $plugin"
+
+      # The release assets: the versioned .so, the versionless alias the installer's
+      # latest/download URL needs, and both scripts. Staged in one place so the artifact upload
+      # and the release upload cannot ship different sets.
+      - name: stage release assets
+        run: |
+          set -Eeuo pipefail
+          mkdir -p dist/release
+          # Both names: the versioned asset the cask points at, and the versionless alias the
+          # installer's latest/download URL needs.
+          cp "$PLUGIN_SO" dist/release/
+          cp "$PLUGIN_SO" dist/release/katexdown-macos-arm64.so
+          cp packaging/macos/install-macos.sh packaging/macos/uninstall-macos.sh dist/release/
+          ls -l dist/release
+
+      # The packaged install is verified against a REAL Kate dmg, not against Homebrew's complete
+      # Qt. The install script is run exactly as a user would run it, and the render test is
+      # pointed at the engine the installer deployed. Print debug.log before deciding anything:
+      # Chromium writes its fatal diagnostics there rather than to stdout.
+      - name: verify against the newest real Kate dmg
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -Eeuo pipefail
+
+          # Resolve the newest release series that has macOS builds. KDE rotates old builds off
+          # the CDN, so pinning a URL 404s within weeks; always testing the newest Kate is also
+          # what makes this step the Qt-minor canary.
+          root='https://cdn.kde.org/ci-builds/utilities/kate/'
+          series="$(curl -fsSL "$root" | grep -oE 'href="release-[0-9.]+/"' | sed -E 's/.*"(release-[0-9.]+)\/".*/\1/' | sort -u || true)"
+          if [ -z "$series" ]; then echo "::error::no release-* series found at $root"; exit 1; fi
+          dir=""
+          for s in $(printf '%s\n' "$series" | sort -r); do
+            cand="${root}${s}/macos-${ARCH}/"
+            if curl -fsSL -o /dev/null "$cand" 2>/dev/null; then
+              dir="$cand"
+              echo "series: $s"
+              break
+            fi
+            echo "series $s has no macos-${ARCH} builds yet"
+          done
+          if [ -z "$dir" ]; then echo "::error::no release series with macos-${ARCH} builds at $root"; exit 1; fi
+          page="$(curl -fsSL "$dir")"
+          dmg="$(printf '%s' "$page" | grep -oE "kate-release_[0-9.]+-[0-9]+-macos-clang-${ARCH}\.dmg" | sort -t- -k3 -n | tail -n 1 || true)"
+          if [ -z "$dmg" ]; then echo "::error::no Kate dmg found at $dir"; exit 1; fi
+          echo "using $dmg"
+          curl -fSL --retry 3 "$dir$dmg" -o "$RUNNER_TEMP/kate.dmg"
+
+          mnt="$RUNNER_TEMP/kate-mnt"
+          mkdir -p "$mnt"
+          hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "$RUNNER_TEMP/kate.dmg" >/dev/null
+          # Detach even when something below fails, or the image stays mounted on the runner.
+          trap 'hdiutil detach "$mnt" >/dev/null 2>&1 || true' EXIT
+          app=""
+          for cand in "$mnt"/kate.app "$mnt"/Kate.app "$mnt"/*.app; do
+            [ -d "$cand" ] || continue
+            case "$(basename "$cand")" in
+              [Kk]ate.app) app="$cand"; break ;;
+            esac
+          done
+          if [ -z "$app" ]; then echo "::error::no kate.app inside the dmg"; exit 1; fi
+          # The dmg is read-only; install and re-sign into a writable copy.
+          kate="$RUNNER_TEMP/kate.app"
+          rm -rf "$kate"
+          ditto "$app" "$kate"
+          hdiutil detach "$mnt" >/dev/null
+          trap - EXIT
+
+          # The canary. install-macos.sh pins KATEXDOWN_QT_MINOR; a plugin built for another minor
+          # silently never appears in Kate's plugin list, so fail with the rebuild instruction.
+          qtcore="$kate/Contents/Frameworks/QtCore.framework"
+          plist=""
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            plist="$f"
+            break
+          done <<EOF
+          $(find "$qtcore" -path '*Resources/Info.plist' 2>/dev/null || true)
+          EOF
+          if [ -z "$plist" ]; then echo "::error::no QtCore Info.plist under $qtcore"; exit 1; fi
+          kate_qt="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")"
+          kate_minor="$(printf '%s' "$kate_qt" | awk -F. '{print $1"."$2}')"
+          echo "Kate's Qt: $kate_qt (minor $kate_minor); pinned $QT_MINOR"
+          if [ "$kate_minor" != "$QT_MINOR" ]; then
+            echo "::error::Kate moved to Qt $kate_qt. Rebuild the plugin for Qt $kate_minor: bump KATEXDOWN_QT_MINOR in packaging/macos/install-macos.sh, rebuild, and re-run this job."
+            exit 1
+          fi
+
+          # Install with the same script users run, into the copy. KATEXDOWN_STATE_DIR keeps the
+          # manifest out of the runner's real config and makes the later uninstall deterministic.
+          export KATEXDOWN_STATE_DIR="$RUNNER_TEMP/kdx-state"
+          packaging/macos/install-macos.sh --kate "$kate" --plugin "$PLUGIN_SO"
+          plugin_dst="$kate/Contents/PlugIns/kf6/ktexteditor/katexdown.so"
+          if [ ! -f "$plugin_dst" ]; then echo "::error::install-macos.sh did not place the plugin"; exit 1; fi
+          codesign --verify --deep --strict "$kate" || { echo "::error::the patched Kate does not verify"; exit 1; }
+
+          # Point the test at the engine the installer deployed, not at Homebrew's complete Qt:
+          # otherwise a missing QtWebEngineProcess.app or Chromium data file in Kate would still
+          # pass. dyld searches DYLD_FRAMEWORK_PATH/DYLD_LIBRARY_PATH *before* a dependency's
+          # install name, so this overrides both @rpath and absolute Homebrew paths for every
+          # framework Kate ships with (and falls back to Homebrew for what Kate does not, e.g.
+          # QtTest or the offscreen platform plugin).
+          test_bin=""
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            test_bin="$f"
+            break
+          done <<EOF
+          $(find build -type f -name previewlifecycletest 2>/dev/null || true)
+          EOF
+          if [ -z "$test_bin" ]; then echo "::error::previewlifecycletest was not built"; exit 1; fi
+          qt_prefix="$(brew --prefix qt)"
+          qtbase_prefix="$(brew --prefix qtbase)"
+          kate_fw="$kate/Contents/Frameworks"
+          export DYLD_FRAMEWORK_PATH="$kate_fw"
+          export DYLD_LIBRARY_PATH="$kate_fw"
+          export DYLD_FALLBACK_FRAMEWORK_PATH="$qt_prefix/lib"
+          export DYLD_FALLBACK_LIBRARY_PATH="$qt_prefix/lib"
+          export QT_PLUGIN_PATH="$kate/Contents/PlugIns:$qtbase_prefix/share/qt/plugins:$qtbase_prefix/lib/qt6/plugins"
+          export QTWEBENGINE_RESOURCES_PATH="$kate/Contents/Resources"
+          export QTWEBENGINE_LOCALES_PATH="$kate/Contents/Resources/qtwebengine_locales"
+          export QT_QPA_PLATFORM=offscreen
+          export QTWEBENGINE_CHROMIUM_FLAGS='--disable-gpu --no-sandbox'
+          export KATEXDOWN_DATA_DIR="$GITHUB_WORKSPACE/runtime"
+          echo "running $test_bin against $kate"
+          test_rc=0
+          "$test_bin" || test_rc=$?
+          if [ -f debug.log ]; then
+            echo '--- debug.log ---'
+            cat debug.log
+          fi
+          if [ "$test_rc" -ne 0 ]; then
+            echo "::error::previewlifecycletest exited $test_rc against the packaged install"
+            exit 1
+          fi
+          echo 'render test passed against the packaged Kate install'
+
+          # Uninstall must remove exactly what the install recorded, and re-sign.
+          packaging/macos/install-macos.sh --uninstall --purge --kate "$kate"
+          if [ -e "$plugin_dst" ]; then echo "::error::uninstall left the plugin behind"; exit 1; fi
+          echo 'install -> render -> uninstall passed'
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: katexdown-macos-${{ matrix.arch }}
+          path: dist/release/*
+          if-no-files-found: error
+
+      - name: attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          tag="$GITHUB_REF_NAME"
+          # release.yml creates the release on the same tag push, so this can win the race. Wait
+          # for it rather than creating a second, competing release.
+          found="0"
+          for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then found="1"; break; fi
+            sleep 15
+          done
+          if [ "$found" != "1" ]; then echo "::error::release $tag never appeared; is release.yml failing?"; exit 1; fi
+          gh release upload "$tag" dist/release/* --repo "$GITHUB_REPOSITORY" --clobber

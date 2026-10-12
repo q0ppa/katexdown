@@ -142,23 +142,122 @@ files.kde.org, so expect an hour or two per run.
 
 ### macOS
 
-Kate is [available for macOS](https://kate-editor.org/get-it/) (KDE binary
-factory / `brew install --cask kate`). The Katexdown code is plain Qt6/KF6 and
-is cross-platform in principle, but there is **no prebuilt installer for macOS
-yet** — the app bundle ships its own Qt/KF frameworks, so a plugin compiled
-against system libraries will not load. The supported path is building the
-whole KDE stack with [Craft](https://community.kde.org/Craft) (the same tooling
-as the Windows build) and letting it build this plugin against kate's
-frameworks:
+Kate for macOS ships its own Qt/KF frameworks and **no Qt WebEngine**, and it
+is Developer-ID signed with the hardened runtime, so a plugin built against
+system libraries is rejected. Katexdown's installer closes both gaps at once:
+it copies the plugin into Kate, borrows the missing WebEngine runtime from
+Homebrew and re-signs the bundle.
+
+On an Apple Silicon Mac (see the notes below), with Homebrew installed:
 
 ```bash
-craft --package kate
-craft --package katexdown   # after adding a Craft blueprint, or:
-craft katexdown             # local recipes via craft's local overlay
+curl -fsSL https://github.com/q0ppa/katexdown/releases/latest/download/install-macos.sh | bash
 ```
 
-If that is too much machinery, run kate in a Linux VM/container and install
-there — the plugin behaves identically.
+Quit Kate first — the installer refuses to touch a running Kate. It will not
+ask anything and prints each step. Replace `q0ppa/katexdown` with your
+fork's path if you forked this project.
+
+What it does:
+
+- finds Kate (or takes `--kate /path/to/Kate.app`), and refuses while Kate is
+  running;
+- refuses a plugin built for a different Qt **minor** than Kate's — that
+  mismatch is otherwise invisible: Kate silently never lists the plugin;
+- copies `katexdown.so` into `Kate.app/Contents/PlugIns/kf6/ktexteditor/`;
+- deploys Qt WebEngine (frameworks, `QtWebEngineProcess.app` and the Chromium
+  data files), `QtWebChannel` and `QtPositioning` into Kate's
+  `Contents/Frameworks/` with `macdeployqt`, then resolves anything still
+  pointing outside the bundle;
+- re-signs Kate ad-hoc with `packaging/macos/katexdown.entitlements` (library
+  validation has to be off for a foreign plugin to load) and removes the
+  quarantine attribute;
+- verifies the result and fails loudly if a framework, the render helper or
+  the Chromium data files are missing.
+
+Then start Kate and enable the plugin under Settings → Configure Kate →
+Plugins. Use `--doctor` to see each precondition without changing anything:
+
+```bash
+curl -fsSL https://github.com/q0ppa/katexdown/releases/latest/download/install-macos.sh | bash -s -- --doctor
+```
+
+> [!IMPORTANT]
+> The install replaces Kate's vendor signature with an ad-hoc signature; that
+> cannot be undone in place. The clean revert is `brew reinstall --cask kate`.
+
+**After Kate updates.** `brew upgrade --cask kate` replaces the whole bundle
+and wipes the plugin. Run the installer again — it is idempotent:
+
+```bash
+brew upgrade --cask kate
+curl -fsSL https://github.com/q0ppa/katexdown/releases/latest/download/install-macos.sh | bash
+```
+
+**Uninstall / revert.** The uninstaller removes exactly the files the install
+recorded and re-signs Kate:
+
+```bash
+curl -fsSL https://github.com/q0ppa/katexdown/releases/latest/download/uninstall-macos.sh | bash
+```
+
+For a completely pristine bundle (restores Kate's vendor signature):
+
+```bash
+brew reinstall --cask kate
+```
+
+**Homebrew cask.** A cask template lives at `packaging/macos/Casks/katexdown.rb`
+for a project tap (`depends_on cask: "kate"`, `depends_on formula:
+"qtwebengine"`, installer/uninstaller scripts). It is a template, not a
+published tap yet.
+
+Notes for macOS:
+
+- **Apple Silicon (arm64) only for now.** Homebrew publishes no `qt`/
+  `qtwebengine` bottle for Intel macOS, so there is no engine for the installer
+  to borrow on an Intel Mac. It refuses with that explanation; Intel needs the
+  deferred self-hosted-payload method in `design/macos-install.md` (Method 1b)
+  or a full Craft build.
+- Qt **patch** releases are interchangeable — Kate's plugin loader compares
+  major.minor only — but Qt **minor** is not. When Kate moves to a new Qt
+  minor, the installer refuses the old plugin on purpose and a release built
+  for that minor is needed. `.github/workflows/macos.yml` tests against the
+  newest Kate and fails when that happens; the failure is the signal to
+  rebuild.
+- This flow is new and has not been executed end-to-end on a Mac in this
+  repository yet. `packaging/macos/README.md` lists exactly what is verified
+  and what still needs checking on macOS; the CI job runs the full install →
+  render test → uninstall sequence against a real Kate dmg.
+
+#### How the macOS release is produced (for maintainers and forks)
+
+A tag push (`vX.Y.Z`) runs `.github/workflows/macos.yml` alongside the other
+workflows. It:
+
+1. verifies the runner is an arm64 Mac with native Homebrew at `/opt/homebrew`;
+2. installs Homebrew Qt and source-builds the pinned KF6 frameworks the plugin
+   links against (`packaging/macos/build-kf6.sh`; Homebrew has no KF6 formula),
+   caching that prefix by KF6 version + Qt minor + architecture;
+3. builds the plugin and the test binaries with
+   `packaging/macos/build-plugin.sh`, which refuses to build when Homebrew's Qt
+   minor no longer matches the pin;
+4. downloads the newest real Kate dmg from KDE's CDN, mounts it, copies
+   `kate.app` out and aborts with the rebuild instruction when Kate's Qt minor
+   moved (the canary);
+5. installs the just-built plugin into that copy with `install-macos.sh`, runs
+   `previewlifecycletest` with `DYLD_FRAMEWORK_PATH`/`QT_PLUGIN_PATH` pointed at
+   the patched app (so the test uses the engine the installer deployed), then
+   uninstalls and checks it is gone;
+6. uploads `katexdown-<version>-macos-arm64.so`, the versionless
+   `katexdown-macos-arm64.so` alias, `install-macos.sh` and
+   `uninstall-macos.sh` to the Release.
+
+`packaging/macos/README.md` is the recorded recipe; the CI calls the same two
+scripts, so a manual build and CI cannot diverge. `build-kf6.sh` builds the
+pinned KF6 closure from source because there is no Homebrew KF6 formula for
+macOS; the plugin does not ship or link that prefix at runtime — installing
+into Kate rewrites every reference to Kate's own copy.
 
 ### Requirements (all platforms)
 

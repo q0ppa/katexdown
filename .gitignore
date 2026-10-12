@@ -2,6 +2,9 @@
 /build*/
 build/
 
+# macOS KF6 prefix built against Homebrew Qt (packaging/macos/build-kf6.sh)
+/.kf6-prefix/
+
 # Downloaded math assets (tools/fetch-assets.py) — re-fetch, never commit
 /runtime/
 
