@@ -1,4 +1,4 @@
-# Maintainer: katexdown contributors
+# Maintainer: q0ppa
 #
 # Katexdown — katdown fork with KaTeX math, custom CSS, follow-mode panel and
 # HTML export. This PKGBUILD builds straight from the parent directory of this
@@ -16,7 +16,7 @@ pkgver=0.2.0.r21.g13bd20a
 pkgrel=1
 pkgdesc="Markdown preview side panel for Kate with KaTeX math and custom CSS (katdown fork)"
 arch=('x86_64')
-url="https://github.com/uwuclxdy/katdown"
+url="https://github.com/q0ppa/katexdown"
 license=('GPL-3.0-or-later')
 depends=('ktexteditor' 'syntax-highlighting' 'kxmlgui' 'kconfig' 'ki18n' 'kcoreaddons' 'qt6-base' 'qt6-webengine')
 makedepends=('git' 'cmake' 'extra-cmake-modules')

@@ -47,8 +47,11 @@ build instead of compiling the new code.
 Then enable it: Settings -> Configure Kate -> Plugins -> check **Katexdown**.
 
 > [!NOTE]
-> If you later publish this fork on GitHub, point `source=` in `aur/PKGBUILD`
-> at your repository and the same PKGBUILD can go to the AUR as-is.
+> The PKGBUILD is deliberately local-only: its `source=` is a
+> `git+file://` clone of this repository, so it builds your working tree
+> (uncommitted changes included) and is not installable from the AUR. There
+> is no AUR publish workflow; to distribute via the AUR you would need a
+> separate `pkgname` and an `https`/`git` source pointing at the pushed fork.
 
 ### Build from source (any Linux)
 
@@ -136,8 +139,7 @@ Re-run the workflow (a new tag, or Actions → Run workflow) and it pulls the
 current Craft Qt and produces an installer for the current Kate.
 
 Forks need only GitHub Actions enabled on the fork; the `release` and
-`windows` workflows use no secrets (only `publish-aur`, which is the
-Linux/AUR-only one, needs AUR credentials). Windows runs pull a few GB from
+`windows` workflows use no secrets. Windows runs pull a few GB from
 files.kde.org, so expect an hour or two per run.
 
 ### macOS

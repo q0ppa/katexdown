@@ -27,7 +27,7 @@
 
 namespace
 {
-const QString repoUrl = QStringLiteral("https://github.com/uwuclxdy/katexdown");
+const QString repoUrl = QStringLiteral("https://github.com/q0ppa/katexdown");
 
 QString currentVersion()
 {
@@ -361,7 +361,7 @@ void ConfigPage::checkForUpdates()
     m_checkButton->setEnabled(false);
     m_updateStatus->setText(i18n("Checking…"));
 
-    QNetworkRequest req(QUrl(QStringLiteral("https://api.github.com/repos/uwuclxdy/katexdown/releases/latest")));
+    QNetworkRequest req(QUrl(QStringLiteral("https://api.github.com/repos/q0ppa/katexdown/releases/latest")));
     req.setRawHeader("Accept", "application/vnd.github+json");
     req.setRawHeader("User-Agent", "katexdown");
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);

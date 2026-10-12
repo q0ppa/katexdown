@@ -2,7 +2,7 @@
 # plugin's in-app update check (Settings -> Katexdown) compares the installed version
 # against the latest release tag. This job builds nothing itself; windows.yml runs on the same tag
 # and attaches the Windows installer exe once this has created the release. Linux installs stay on
-# the AUR package and build-from-source, never a release download.
+# the local PKGBUILD and build-from-source, never a release download.
 #
 # Tagging discipline: the tag must match project(VERSION) in CMakeLists.txt (and the Version in
 # src/katexdown.json), otherwise the in-app check reports a phantom update. The job hard

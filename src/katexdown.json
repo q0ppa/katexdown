@@ -6,8 +6,11 @@
         "Icon": "text-markdown",
         "Category": "Editor",
         "License": "GPL-3.0-or-later",
-        "Version": "0.3.6",
+        "Version": "0.3.8",
         "Authors": [
+            {
+                "Name": "q0ppa"
+            },
             {
                 "Name": "uwuclxdy",
                 "Email": "uwuclxdy@pm.me"

@@ -42,6 +42,33 @@ network: `Could not read from remote repository`).
   `pkgver=` line workflow (bump `pkgver=` one commit behind, let `pkgver()`
   rewrite it during the build).
 
+## No AUR publish workflow
+
+There is intentionally **no** `.github/workflows/publish-aur.yml`. A workflow that
+regenerated `.SRCINFO` and pushed `aur/PKGBUILD` to the AUR used to exist and
+failed on every run, for three independent reasons — any one of them is fatal,
+so it was removed rather than patched:
+
+- **The PKGBUILD is not AUR-installable.** Its `source=` is
+  `git+file://${PWD%/*}`, a local clone that only exists when `makepkg` runs
+  from inside this repository. On an AUR user's machine there is no such path.
+  The whole design above depends on this local source; changing it to
+  `git+https://…` to satisfy the AUR would drop the "builds your working tree"
+  guarantee this file documents.
+- **It pushed to the wrong package.** The remote was
+  `ssh://aur@aur.archlinux.org/katdown-git.git` while the PKGBUILD's `pkgname`
+  is `katexdown-git`. Worse, `katdown-git` on the AUR is upstream
+  (maintained by `uwuclxdy`), not this fork — a push can only ever be rejected
+  for lack of ownership rights, and it risks colliding with upstream's package.
+- **The credentials are not part of the repo.** The job needs
+  `AUR_SSH_PRIVATE_KEY`/`AUR_USERNAME` secrets registered to an AUR account that
+  owns the target package. Forks (and this repo) never had them, so the job
+  failed before it could even reach the push.
+
+`aur/prepare-aur.sh` (`updpkgsums` + `makepkg --printsrcinfo`) stays: it is a
+local developer convenience for hand-publishing a *different* package later,
+not something CI runs.
+
 ## Invariants
 
 - A repeat `makepkg` run in `aur/` (existing `src/`, `pkg/` and `$SRCDEST`
@@ -81,5 +108,7 @@ first run in place) and checking both succeed and that the work copy's
 ## Where it lives
 
 - `aur/PKGBUILD` — `source`, `prepare()` (the `.git` exclusion), `pkgver()`.
+- `aur/prepare-aur.sh` — local `updpkgsums` + `.SRCINFO` regeneration.
 - `.gitignore` — `/aur/src/`, `/aur/pkg/`, `/aur/katexdown/`,
   `/aur/*.pkg.tar.*` (makepkg debris).
+- No CI workflow may `git push` this PKGBUILD to the AUR (see above).
