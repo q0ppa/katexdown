@@ -71,8 +71,10 @@ with the CI cache key.
 
 `build-kf6.sh`'s list is the transitive build dependency closure of KTextEditor
 6.30, generated from KDE's `dependency-data-kf6-qt6` and ordered topologically,
-minus `kdoctools` and `breeze-icons` (docs/themes only — disabled with
-`CMAKE_DISABLE_FIND_PACKAGE_KF6DocTools=ON` / `USE_BreezeIcons=OFF`). If a
+minus `kdoctools`, `breeze-icons` and `kglobalaccel`. `kdoctools`/`breeze-icons`
+are docs/themes only (disabled with `CMAKE_DISABLE_FIND_PACKAGE_KF6DocTools=ON`
+/ `USE_BreezeIcons=OFF`); `kglobalaccel` is Linux/FreeBSD-only and is skipped by
+KXmlGui on APPLE anyway, so nothing in the closure links it. If a
 future KF6 adds a required dependency, the framework that needs it fails its
 configure loudly with the missing package name; add it to the list. The plugin
 build itself does **not** link the Homebrew/KF6 prefixes at runtime — installing

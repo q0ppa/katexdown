@@ -156,12 +156,16 @@ CI cannot diverge:
   `KATEXDOWN_KF6_VERSION`) into a prefix, skipping frameworks already installed
   there so the CI cache restores in place. Its repository list is the transitive
   build-dependency closure of KTextEditor, generated from KDE's
-  `dependency-data-kf6-qt6` and topologically ordered, minus `kdoctools` and
-  `breeze-icons` (docs/themes only; disabled with
-  `CMAKE_DISABLE_FIND_PACKAGE_KF6DocTools=ON` and `USE_BreezeIcons=OFF`). If a
-  future KF6 release adds a required dependency, the framework that needs it
-  fails its configure with the missing package name and the list must be
-  updated.
+  `dependency-data-kf6-qt6` and topologically ordered, minus `kdoctools`,
+  `breeze-icons` and `kglobalaccel`. `kdoctools`/`breeze-icons` are docs/themes
+  only (disabled with `CMAKE_DISABLE_FIND_PACKAGE_KF6DocTools=ON` and
+  `USE_BreezeIcons=OFF`). `kglobalaccel` is a Linux/FreeBSD-only framework
+  (X11/Plasma-Wayland, no macOS backend) whose platform check aborts the
+  configure on Darwin; KXmlGui, its only consumer in the closure, already
+  excludes it on APPLE, so dropping it removes a dependency rather than
+  disabling needed behaviour. If a future KF6 release adds a required
+  dependency, the framework that needs it fails its configure with the missing
+  package name and the list must be updated.
 
 ## Deferred: Method 1b (self-hosted WebEngine payload)
 

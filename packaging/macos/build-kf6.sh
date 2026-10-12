@@ -11,12 +11,18 @@
 #
 # THE LIST IS THE KTextEditor CLOSURE
 #   The repositories below are the transitive build dependency closure of KTextEditor 6.30,
-#   generated from KDE's repo-metadata (dependency-data-kf6-qt6) and ordered topologically. Two
+#   generated from KDE's repo-metadata (dependency-data-kf6-qt6) and ordered topologically. Three
 #   entries from that closure are deliberately omitted:
 #     * kdoctools   - only needed for translated docs; CMAKE_DISABLE_FIND_PACKAGE_KF6DocTools=ON
 #                     makes kservice/kio skip it (it is an optional find_package in both).
 #     * breeze-icons- only pulled in by KIconThemes' USE_BreezeIcons option, which is set to OFF.
 #                     The plugin does not ship icons; the host app supplies the theme.
+#     * kglobalaccel- its metainfo.yaml lists only Linux/FreeBSD and it has no macOS backend
+#                     (X11/Plasma-Wayland only), so its configure aborts with a platform
+#                     FATAL_ERROR on Darwin. Its only consumer in this closure is KXmlGui, which
+#                     already excludes it on APPLE (kxmlgui's CMakeLists guards the
+#                     find_package with NOT APPLE), so nothing here links KF6::GlobalAccel. Do not
+#                     add it back for Darwin; the platform check is telling the truth.
 #   If a future KF6 release adds a required dependency, the configure of the framework that needs
 #   it fails loudly with the missing package name, and this list must be updated. Bump
 #   KATEXDOWN_KF6_VERSION only together with build-plugin.sh / the CI cache key.
@@ -107,7 +113,6 @@ kcompletion:lib/cmake/KF6Completion/KF6CompletionConfig.cmake
 kconfigwidgets:lib/cmake/KF6ConfigWidgets/KF6ConfigWidgetsConfig.cmake
 kcrash:lib/cmake/KF6Crash/KF6CrashConfig.cmake
 kdbusaddons:lib/cmake/KF6DBusAddons/KF6DBusAddonsConfig.cmake
-kglobalaccel:lib/cmake/KF6GlobalAccel/KF6GlobalAccelConfig.cmake
 kiconthemes:lib/cmake/KF6IconThemes/KF6IconThemesConfig.cmake
 kitemviews:lib/cmake/KF6ItemViews/KF6ItemViewsConfig.cmake
 knotifications:lib/cmake/KF6Notifications/KF6NotificationsConfig.cmake
