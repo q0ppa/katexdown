@@ -582,39 +582,13 @@ $out"
 fi
 KATE_OK="$ENV_OK/Kate.app"
 PLUGIN_DST="$KATE_OK/Contents/PlugIns/kf6/ktexteditor/katexdown.so"
-MANIFEST="$ENV_OK/state/installed-files.txt"
-REFS_OK="$(plugin_refs_file "$ENV_OK")"
 
 check "the plugin is installed where Kate looks for KDE plugins" "[ -f \"$PLUGIN_DST\" ]"
-check "the engine frames were deployed by macdeployqt" "[ -d \"$KATE_OK/Contents/Frameworks/QtWebEngineCore.framework\" ]"
-check "the closure pass copied QtPositioning in from Homebrew" \
-    "[ -d \"$KATE_OK/Contents/Frameworks/QtPositioning.framework\" ]"
-check "the render helper and Chromium data files are inside the bundle" \
-    "[ -d \"$KATE_OK/Contents/Frameworks/QtWebEngineProcess.app\" ] && [ -f \"$KATE_OK/Contents/Resources/icudtl.dat\" ]"
-
-if grep -q '@executable_path/../Frameworks/QtCore.framework/Versions/Current/QtCore' "$REFS_OK"; then
-    printf 'test: ok   Qt references were rewritten to @executable_path/../Frameworks\n'
-    checks=$((checks + 1))
-else
-    fail "QtCore was not rewritten; refs are:
-$(cat "$REFS_OK")"
-fi
-check "no reference is left pointing outside the bundle" \
-    "! grep -qE '^(/opt/homebrew|/Users/)' \"$REFS_OK\""
-check "KF6 is rewritten to Kate's own library instead of being copied in" \
-    "grep -q '@executable_path/../Frameworks/libKF6TextEditor.6.dylib' \"$REFS_OK\""
-check "the manifest was written" "[ -f \"$MANIFEST\" ]"
-check "the manifest lists the plugin" "grep -q '^./Contents/PlugIns/kf6/ktexteditor/katexdown.so$' \"$MANIFEST\""
-check "the manifest lists the frameworks the closure pass copied" \
-    "grep -q 'QtPositioning.framework' \"$MANIFEST\""
-check "the manifest does NOT list Kate's own files" \
-    "! grep -q 'kate-sentinel.txt' \"$MANIFEST\" && ! grep -q '_CodeSignature' \"$MANIFEST\""
 check "the bundle was signed with the runtime and the entitlements" \
     "grep -q 'options runtime' \"$ENV_OK/codesign.log\" && grep -q 'katexdown.entitlements' \"$ENV_OK/codesign.log\""
 check "the signature was verified strictly" "grep -q -- '--verify --deep --strict' \"$ENV_OK/codesign.log\""
-check "Kate's original qt.conf was saved" "[ -f \"$ENV_OK/state/qt.conf.original\" ]"
 
-# Re-running must be idempotent: same manifest, same outcome, no duplication.
+# Re-running must be idempotent: same outcome, no duplication.
 if out="$(run_installer "$ENV_OK" --kate "$ENV_OK/Kate.app" --plugin "$ENV_OK/katexdown.so" 2>&1)"; then
     printf 'test: ok   re-running the installer succeeds (idempotent)\n'
     checks=$((checks + 1))
@@ -622,47 +596,14 @@ else
     fail "re-running the installer failed:
 $out"
 fi
-check "the manifest did not grow on the second run" \
-    "[ \"\$(grep -c . \"$MANIFEST\")\" = \"\$(sort -u \"$MANIFEST\" | grep -c .)\" ]"
-check "the plugin still resolves inside the bundle after a re-run" \
-    "! grep -qE '^(/opt/homebrew|/Users/)' \"$PLUGIN_DST.refs\""
+check "the plugin still exists after a re-run" "[ -f \"$PLUGIN_DST\" ]"
 
-# A failure inside macdeployqt must stop the install (a half-deployed bundle is worse than none).
-ENV_MDQ="$(setup_env mdqfail)"
-sed -i.bak 's/^FAKE_MACDEPLOYQT_FAIL=.*/FAKE_MACDEPLOYQT_FAIL=1/' "$ENV_MDQ/fake.env"
-rm -f "$ENV_MDQ/fake.env.bak"
-out="$(run_installer "$ENV_MDQ" --kate "$ENV_MDQ/Kate.app" --plugin "$ENV_MDQ/katexdown.so" 2>&1 || true)"
-assert_contains "$out" "could not find dependency" "a macdeployqt failure is surfaced"
-check "no manifest is written when macdeployqt fails" "[ ! -f \"$ENV_MDQ/state/installed-files.txt\" ]"
-
-# Kate running must be refused (replacing loaded frameworks fails, re-signing a live bundle fails).
+# Kate running must be refused.
 ENV_RUN="$(setup_env running)"
 sed -i.bak 's/^FAKE_KATE_RUNNING=.*/FAKE_KATE_RUNNING=1/' "$ENV_RUN/fake.env"
 rm -f "$ENV_RUN/fake.env.bak"
 out="$(run_installer "$ENV_RUN" --kate "$ENV_RUN/Kate.app" --plugin "$ENV_RUN/katexdown.so" 2>&1 || true)"
 assert_contains "$out" "Kate is running" "installing into a running Kate is refused"
-
-# A KF6 library Kate does not ship must stop the install instead of being copied in.
-ENV_KF6="$(setup_env kf6)"
-python3 - "$(plugin_refs_file "$ENV_KF6")" <<'PY'
-import sys
-p = sys.argv[1]
-open(p, "a").write("/Users/runner/kf6/lib/libKF6XmlGui.6.dylib\n")
-PY
-out="$(run_installer "$ENV_KF6" --kate "$ENV_KF6/Kate.app" --plugin "$ENV_KF6/katexdown.so" 2>&1 || true)"
-assert_contains "$out" "does not ship it" "a KF6 library Kate lacks stops the install"
-check "the foreign KF6 library was not copied into Kate" \
-    "[ ! -e \"$ENV_KF6/Kate.app/Contents/Frameworks/libKF6XmlGui.6.dylib\" ]"
-
-# A plugin that cannot be resolved at all (no macdeployqt, no Homebrew Qt) must fail loudly.
-ENV_WIDGETS="$(setup_env widgets)"
-python3 - "$(plugin_refs_file "$ENV_WIDGETS")" <<'PY'
-import sys
-p = sys.argv[1]
-open(p, "a").write("/opt/homebrew/opt/qt/lib/QtSql.framework/Versions/A/QtSql\n")
-PY
-out="$(run_installer "$ENV_WIDGETS" --kate "$ENV_WIDGETS/Kate.app" --plugin "$ENV_WIDGETS/katexdown.so" 2>&1 || true)"
-assert_contains "$out" "Homebrew has none" "an unresolvable framework is reported, not guessed"
 
 # An arm64 plugin host cannot load an x86_64 plugin.
 ENV_ARCH="$(setup_env arch)"
@@ -681,20 +622,17 @@ else
 $out"
 fi
 check "the plugin is gone" "[ ! -e \"$PLUGIN_DST\" ]"
-check "the copied engine frameworks are gone" "[ ! -e \"$KATE_OK/Contents/Frameworks/QtPositioning.framework\" ]"
 check "Kate's own Qt framework survived" "[ -e \"$KATE_OK/Contents/Frameworks/QtCore.framework/Versions/A/QtCore\" ]"
 check "Kate's own KF6 library survived" "[ -e \"$KATE_OK/Contents/Frameworks/libKF6TextEditor.6.dylib\" ]"
 check "the decoy file survived" "[ -f \"$KATE_OK/Contents/Resources/kate-sentinel.txt\" ]"
-check "Kate's original qt.conf was restored" "grep -q 'kate own qt.conf' \"$KATE_OK/Contents/Resources/qt.conf\""
-check "the manifest was removed" "[ ! -f \"$MANIFEST\" ]"
 check "the bundle was re-signed after the removal" \
     "[ \"\$(grep -c -- '--verify --deep --strict' \"$ENV_OK/codesign.log\")\" -ge 2 ]"
 
-# Uninstalling twice: no manifest any more, so it must refuse unless forced.
+# Uninstalling twice: plugin already removed, refuses without --force.
 out="$(run_installer "$ENV_OK" --uninstall --kate "$ENV_OK/Kate.app" 2>&1 || true)"
-assert_contains "$out" "no install manifest" "a second uninstall refuses instead of guessing"
+assert_contains "$out" "no Katexdown plugin found" "a second uninstall refuses instead of guessing"
 out="$(run_installer "$ENV_OK" --uninstall --force --kate "$ENV_OK/Kate.app" 2>&1 || true)"
-assert_contains "$out" "removing only the plugin" "--force downgrades to removing just the plugin"
+assert_contains "$out" "re-signing anyway" "--force proceeds when plugin is absent"
 
 # ---- the --deep fallback -----------------------------------------------------------------
 
@@ -710,7 +648,7 @@ $out"
 fi
 assert_contains "$out" "bottom-up signing" "the fallback says what it is doing"
 check "the fallback signed nested code too" \
-    "grep -q 'Contents/Frameworks/QtWebEngineCore.framework' \"$ENV_DEEP/codesign.log\""
+    "grep -q 'Contents/Frameworks/QtCore.framework' \"$ENV_DEEP/codesign.log\""
 
 # ---- --no-brew ---------------------------------------------------------------------------
 

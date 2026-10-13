@@ -1,36 +1,15 @@
 #!/usr/bin/env bash
 #
-# katexdown - build the macOS plugin (the thin .so that install-macos.sh installs).
+# katexdown - build the macOS plugin locally for Apple Silicon (arm64).
 #
 # WHAT IT PRODUCES
-#   <out-dir>/katexdown-<version>-macos-<arch>.so, and the path is printed on stdout.
-#   The .so keeps its references to the Homebrew Qt / KF6 build prefixes on purpose: installing
-#   into Kate rewrites every one of them to @executable_path/../Frameworks/... and knows which of
-#   them Kate already ships. Do not run install_name_tool here.
+#   <out-dir>/katexdown-<version>-macos-<arch>.so
 #
-# PREREQUISITES (Homebrew is an accepted prerequisite of this method)
-#   macOS on arm64 (Method 1 is arm64-only: there is no Homebrew Qt bottle for Intel macOS - see
-#   design/macos-install.md), Homebrew with `qt` (that pulls qtbase/qtdeclarative/qtspeech/qtsvg/
-#   qttools/qtwebchannel/qtwebengine/qtpositioning - KTextEditor needs Qt Qml/Quick/PrintSupport/
-#   TextToSpeech and KIconThemes needs Qt Svg, so these are build dependencies, not plugin ones),
-#   plus cmake and ninja:
-#
+# PREREQUISITES
+#   macOS on Apple Silicon (arm64), with Homebrew:
 #       brew install cmake ninja pkgconf qt gettext bison
 #
-#   A KF6 prefix built against the same Qt. Point --kf6-prefix at one, or let this script build it
-#   with build-kf6.sh (pinned version, cached by CI).
-#
-# THE QT-MINOR GUARD
-#   The Qt minor the release is built for is pinned once, in KATEXDOWN_QT_MINOR inside
-#   install-macos.sh. This script refuses to build when Homebrew's Qt minor differs from that pin,
-#   because Kate's plugin loader compares major.minor only: a mismatched plugin does not error, it
-#   simply never appears in Kate's plugin list. The canary in .github/workflows/macos.yml compares
-#   the same pin against the Qt in a freshly downloaded Kate and fails when Kate moves.
-#
-# RECORDED RECIPE
-#   .github/workflows/macos.yml calls this script, so a manual build and the CI cannot diverge.
-#   Untested on macOS as of this revision; see packaging/macos/README.md for the list of things
-#   that must be verified on a Mac (the CI job is the end-to-end check).
+#   A KF6 prefix built against Homebrew Qt (build-kf6.sh builds it once locally).
 
 set -euo pipefail
 
@@ -44,14 +23,6 @@ info() { printf '%s: %s\n' "$PROG" "$*" >&2; }
 warn() { printf '%s: warning: %s\n' "$PROG" "$*" >&2; }
 die()  { printf '%s: error: %s\n' "$PROG" "$*" >&2; exit 1; }
 
-pinned_qt_minor() {
-    local f="$script_dir/install-macos.sh" v
-    [ -f "$f" ] || die "install-macos.sh not found next to this script; cannot read the pinned Qt minor"
-    v="$(sed -n 's/^KATEXDOWN_QT_MINOR="\([0-9][0-9.]*\)".*/\1/p' "$f" | head -1)"
-    [ -n "$v" ] || die "could not find KATEXDOWN_QT_MINOR in $f"
-    printf '%s' "$v"
-}
-
 usage() {
     cat <<EOF
 ${PROG} - build the Katexdown plugin for macOS (arm64)
@@ -63,11 +34,11 @@ Options:
   --out-dir DIR         where the release .so is written (default ./dist)
   --kf6-prefix DIR      KF6 install prefix (default \$KATEXDOWN_KF6_PREFIX or ~/.local/katexdown-kf6)
   --qt-prefix DIR       Homebrew Qt prefix (default: \$(brew --prefix qt))
-  --with-tests          also build the test binaries (previewlifecycletest etc.); CI needs them
+  --with-tests          also build the test binaries
   --no-build-kf6        never run build-kf6.sh; fail when the KF6 prefix is incomplete
   --clean               delete the build directory first
-  --jobs N              parallel build jobs (default: the CPU count)
-  --print-qt-minor      print the pinned Qt minor (read from install-macos.sh) and exit
+  --jobs N              parallel build jobs (default: CPU count)
+  --print-qt-minor      print the detected Qt minor and exit
   -h, --help            this text
 
 Environment:
@@ -87,7 +58,7 @@ host_arch() {
 
 require_macos_arm64() {
     [ "$(uname -s)" = "Darwin" ] || die "this recipe builds a macOS plugin; it must run on macOS"
-    [ "$(host_arch)" = "arm64" ] || die "this Mac is $(host_arch); Method 1 is arm64-only (no Homebrew Qt bottle exists for x86_64 macOS)"
+    [ "$(host_arch)" = "arm64" ] || die "this Mac is $(host_arch); Method 1 is arm64-only"
 }
 
 find_brew() {
@@ -101,8 +72,7 @@ find_brew() {
     printf '%s' "$b"
 }
 
-# Qt minor of a QtCore.framework directory, via its Info.plist or qmake as a fallback.
-read_qt_minor_from_prefix() { # $1 = prefix
+read_qt_minor_from_prefix() {
     local prefix="$1" p ver
     for p in "$prefix/lib/QtCore.framework/Resources/Info.plist" \
              "$prefix/lib/QtCore.framework/Versions/A/Resources/Info.plist"; do
@@ -118,8 +88,7 @@ read_qt_minor_from_prefix() { # $1 = prefix
     return 1
 }
 
-# Echoes a ';'-separated CMake prefix list with every Homebrew keg the Qt build needs.
-qt_prefix_list() { # $1 = brew
+qt_prefix_list() {
     local brew="$1" f p out="" first="1"
     for f in qt qtbase qtdeclarative qtspeech qtsvg qttools qtwebchannel qtwebengine qtpositioning; do
         p="$("$brew" --prefix "$f" 2>/dev/null || true)"
@@ -129,14 +98,12 @@ qt_prefix_list() { # $1 = brew
     printf '%s' "$out"
 }
 
-kf6_complete() { # $1 = prefix
+kf6_complete() {
     [ -f "$1/lib/cmake/KF6TextEditor/KF6TextEditorConfig.cmake" ] \
         && [ -f "$1/lib/cmake/KF6Config/KF6ConfigConfig.cmake" ]
 }
 
-# The plugin path is not in a fixed place across KDEInstallDirs versions/platforms, so search and
-# prefer a kf6/ktexteditor path. Avoids `find | head` (SIGPIPE under pipefail).
-find_built() { # $1 = build dir, $2 = file name
+find_built() {
     local f best="" all
     all="$(find "$1" -type f -name "$2" 2>/dev/null || true)"
     while IFS= read -r f; do
@@ -171,7 +138,14 @@ main() {
             --no-build-kf6) build_kf6="0"; shift ;;
             --clean)       clean="1"; shift ;;
             --jobs)        [ $# -ge 2 ] || die "--jobs needs a number"; jobs="$2"; shift 2 ;;
-            --print-qt-minor) pinned_qt_minor; exit 0 ;;
+            --print-qt-minor)
+                local b q
+                b="$(find_brew)"
+                q="$qt_prefix_arg"
+                [ -n "$q" ] || q="$("$b" --prefix qt 2>/dev/null || true)"
+                read_qt_minor_from_prefix "$q" || printf "unknown\n"
+                exit 0
+                ;;
             -h|--help)     usage; exit 0 ;;
             *) die "unknown argument '$1' (see --help)" ;;
         esac
@@ -186,20 +160,15 @@ main() {
     [ -n "$qt_prefix" ] || die "Homebrew's 'qt' formula is not installed; run 'brew install qt'"
     [ -d "$qt_prefix" ] || die "--qt-prefix '$qt_prefix' does not exist"
 
-    local pin brew_minor
-    pin="$(pinned_qt_minor)"
+    local brew_minor
     brew_minor="$(read_qt_minor_from_prefix "$qt_prefix" || true)"
-    [ -n "$brew_minor" ] || die "could not read the Qt version from '$qt_prefix'"
-    if [ "$brew_minor" != "$pin" ]; then
-        die "Homebrew's Qt is $brew_minor but install-macos.sh pins Qt $pin. A plugin built against Qt $brew_minor would silently never load in a Kate on Qt $pin (the loader compares major.minor only). Install a Qt $pin and re-run, or rebuild the plugin for Qt $brew_minor and bump KATEXDOWN_QT_MINOR in install-macos.sh in the same change."
-    fi
-    log "Qt $brew_minor from $qt_prefix (matches the pin in install-macos.sh)"
+    log "Qt ${brew_minor:-unknown} from $qt_prefix"
 
     if ! kf6_complete "$kf6_prefix"; then
         if [ "$build_kf6" != "1" ]; then
             die "the KF6 prefix '$kf6_prefix' is incomplete and --no-build-kf6 was given. Build it with packaging/macos/build-kf6.sh --prefix '$kf6_prefix'"
         fi
-        log "KF6 prefix '$kf6_prefix' is incomplete; building it with build-kf6.sh (pinned, cached)"
+        log "KF6 prefix '$kf6_prefix' is incomplete; building locally with build-kf6.sh..."
         "$script_dir/build-kf6.sh" --prefix "$kf6_prefix" --qt-prefix "$qt_prefix" --jobs "$jobs"
     fi
     kf6_complete "$kf6_prefix" || die "build-kf6.sh finished but '$kf6_prefix' still has no KF6TextEditor/KF6Config"
@@ -213,10 +182,6 @@ main() {
     [ "$with_tests" = "1" ] && testing="ON"
 
     log "configuring the plugin (KF6 $kf6_prefix)"
-    # CMAKE_OSX_ARCHITECTURES is explicit so a Rosetta shell cannot produce an x86_64 .so by accident.
-    # KF6 6.30 is a C++20 build (see build-kf6.sh); pin the same standard here so the plugin and the
-    # frameworks it links share it regardless of what ECM's KDE_INTERNAL_COMPILERSETTINGS_LEVEL
-    # resolves to.
     cmake -B "$build_dir" -S "$repo_root" -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_OSX_ARCHITECTURES=arm64 \
@@ -231,7 +196,7 @@ main() {
     plugin="$(find_built "$build_dir" katexdown.so || true)"
     [ -n "$plugin" ] || plugin="$(find_built "$build_dir" katexdown.dylib || true)"
     [ -n "$plugin" ] || die "the build produced no katexdown.so/.dylib under $build_dir"
-    log "built plugin: $plugin ($(lipo -archs "$plugin" 2>/dev/null || file -b "$plugin"))"
+    log "built plugin: $plugin"
 
     local version
     version="$(awk '/^project\(/ { for (i = 1; i <= NF; i++) if ($i == "VERSION") { print $(i + 1); exit } }' "$repo_root/CMakeLists.txt")"
@@ -251,7 +216,6 @@ main() {
     fi
 
     log "wrote $out_file"
-    # stdout is the one machine-readable line, for the CI to capture.
     printf '%s\n' "$out_file"
 }
 

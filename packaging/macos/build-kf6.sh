@@ -3,16 +3,16 @@
 # katexdown - build the pinned KF6 frameworks the macOS plugin links against.
 #
 # WHY THIS EXISTS
-#   Kate for macOS ships KF6 libraries but Homebrew has no KF6 formula (only a KF5 tap), and the
-#   plugin needs KTextEditor headers + a link-time libKF6TextEditor. So CI builds KF6 from source,
-#   against Homebrew's Qt, once per pinned version, and caches the prefix. Only Homebrew's Qt is
-#   used: the finished plugin resolves Kate's own Qt/KF6 copies at install time (install-macos.sh
-#   rewrites every reference), so the build prefix is a means to an end, not something shipped.
+#   Kate for macOS ships KF6 libraries, but Homebrew has no KF6 formulas (only KF5).
+#   The Katexdown plugin needs KTextEditor headers and link-time libraries to compile.
+#   This script source-builds the required KF6 frameworks locally against Homebrew Qt
+#   into a local prefix (default ~/.local/katexdown-kf6). Once built locally, the prefix
+#   is reused for local plugin builds.
 #
 # THE LIST IS THE KTextEditor CLOSURE
 #   The repositories below are the transitive build dependency closure of KTextEditor 6.30,
 #   generated from KDE's repo-metadata (dependency-data-kf6-qt6) and ordered topologically. Three
-#   entries from that closure are deliberately omitted:
+#   entries from that closure are omitted:
 #     * kdoctools   - only needed for translated docs; CMAKE_DISABLE_FIND_PACKAGE_KF6DocTools=ON
 #                     makes kservice/kio skip it (it is an optional find_package in both).
 #     * breeze-icons- only pulled in by KIconThemes' USE_BreezeIcons option, which is set to OFF.
@@ -21,35 +21,18 @@
 #                     (X11/Plasma-Wayland only), so its configure aborts with a platform
 #                     FATAL_ERROR on Darwin. Its only consumer in this closure is KXmlGui, which
 #                     already excludes it on APPLE (kxmlgui's CMakeLists guards the
-#                     find_package with NOT APPLE), so nothing here links KF6::GlobalAccel. Do not
-#                     add it back for Darwin; the platform check is telling the truth.
-#   If a future KF6 release adds a required dependency, the configure of the framework that needs
-#   it fails loudly with the missing package name, and this list must be updated. Bump
-#   KATEXDOWN_KF6_VERSION only together with build-plugin.sh / the CI cache key.
+#                     find_package with NOT APPLE), so nothing here links KF6::GlobalAccel.
 #
 # FLAGS THAT MATTER
-#   BUILD_TESTING=OFF     - no test frameworks, no extra deps; the plugin's own tests are built by
-#                           build-plugin.sh, not here.
+#   BUILD_TESTING=OFF     - no test frameworks, no extra deps.
 #   CMAKE_DISABLE_FIND_PACKAGE_KF6DocTools=ON - see above (docs only).
 #   USE_BreezeIcons=OFF   - see above.
-#   BUILD_DESIGNERPLUGIN=OFF - KIO's Qt Designer plugin is dead weight for a headless build.
-#   KDE_INSTALL_BUNDLEDIR  - ECM defaults this to the absolute /Applications/KDE on macOS, so
-#                           KTextEditor's install of its ktexteditor-script-tester .app tries to
-#                           write there (outside the prefix and usually not writable) and fails the
-#                           install. Keep bundles inside the prefix like everything else.
-#   CMAKE_OSX_ARCHITECTURES=arm64 - Method 1 is arm64-only (design/macos-install.md).
-#   CMAKE_CXX_STANDARD=20  - KF6 6.30 is a C++20 codebase: KTextEditor's public katedocument.h
-#                           exposes std::span and katetextfolding.cpp builds an aggregate with
-#                           IdAndFlag(id, flags). ECM normally sets 20, but its choice follows
-#                           KDE_INTERNAL_COMPILERSETTINGS_LEVEL, which a restored cache / different
-#                           ECM can resolve lower - the first macOS CI run built KTextEditor as
-#                           C++17 and failed. Pin it so a cache generation cannot build part of the
-#                           prefix as C++17 (the CI cache key also carries cxx20).
-#   BISON_EXECUTABLE/FLEX_EXECUTABLE - macOS ships bison 2.3, and Solid (a KIO dependency)
-#                           needs >= 3.0; Homebrew's bison is keg-only, so its path is passed in.
-#
-# NOT VERIFIED ON macOS YET: the KF6 configure/build was not run on a Mac in this repository. The
-# first CI run is the check; packaging/macos/README.md lists what to look at if it fails.
+#   BUILD_DESIGNERPLUGIN=OFF - KIO's Qt Designer plugin is not needed.
+#   KDE_INSTALL_BUNDLEDIR  - ECM defaults this to the absolute /Applications/KDE on macOS;
+#                           keep bundles inside the prefix.
+#   CMAKE_OSX_ARCHITECTURES=arm64 - Apple Silicon (arm64).
+#   CMAKE_CXX_STANDARD=20  - KF6 6.30 requires C++20.
+#   BISON_EXECUTABLE/FLEX_EXECUTABLE - Homebrew bison path is passed in when needed.
 
 set -euo pipefail
 
