@@ -42,12 +42,17 @@ Consequences that drive the minimal design:
 **Release assets are tiny**: `katexdown-<ver>-macos-<arch>.so`,
 `install-macos.sh`, `uninstall-macos.sh`.
 
-### Install (user)
+### Install & build
 
 Homebrew is an accepted prerequisite (the `brew install --cask kate` audience):
 
 ```sh
-curl -fsSL https://github.com/<owner>/katexdown/releases/latest/download/install-macos.sh | bash
+brew install --cask kate
+brew install cmake ninja pkgconf qt qtwebengine gettext bison
+
+packaging/macos/build-kf6.sh
+packaging/macos/build-plugin.sh
+packaging/macos/install-macos.sh
 ```
 
 `install-macos.sh` performs the following minimal, reliable steps:

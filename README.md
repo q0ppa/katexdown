@@ -188,87 +188,70 @@ files.kde.org, so expect an hour or two per run.
 ### macOS
 
 Kate for macOS ships its own Qt/KF frameworks and **no Qt WebEngine**, and it
-is Developer-ID signed with the hardened runtime, so a foreign plugin cannot load
-under default library validation. Katexdown solves this cleanly:
-it copies `katexdown.so` into Kate's plugin directory, ensures Homebrew
-`qtwebengine` is installed, and re-signs `Kate.app` ad-hoc with library validation
-disabled.
+is Developer-ID signed with the hardened runtime, so foreign plugins cannot load
+under default library validation.
 
-On an Apple Silicon Mac (see the notes below), with Homebrew installed:
+On an Apple Silicon Mac (arm64) with Homebrew installed:
 
-```bash
-curl -fsSL https://github.com/q0ppa/katexdown/releases/latest/download/install-macos.sh | bash
-```
-
-Quit Kate first — the installer refuses to touch a running Kate. It prints each
-step as it runs.
-
-What it does:
-
-- finds Kate (or accepts `--kate /path/to/Kate.app`), and refuses while Kate is
-  running;
-- refuses a plugin built for a different Qt **minor** than Kate's (avoiding
-  silent plugin loader rejection);
-- verifies Homebrew and `qtwebengine` (`brew install qtwebengine`);
-- copies `katexdown.so` into `Kate.app/Contents/PlugIns/kf6/ktexteditor/`;
-- re-signs Kate ad-hoc with `packaging/macos/katexdown.entitlements` (disabling
-  library validation and enabling JIT for WebEngine) and clears quarantine flags.
-
-Then start Kate and enable the plugin under Settings → Configure Kate →
-Plugins. Use `--doctor` to see each precondition without changing anything:
+#### 1. Prerequisites
+Install Kate and the build dependencies via Homebrew:
 
 ```bash
-curl -fsSL https://github.com/q0ppa/katexdown/releases/latest/download/install-macos.sh | bash -s -- --doctor
+brew install --cask kate
+brew install cmake ninja pkgconf qt qtwebengine gettext bison
 ```
 
-> [!IMPORTANT]
-> The install replaces Kate's vendor signature with an ad-hoc signature; that
-> cannot be undone in place. The clean revert is `brew reinstall --cask kate`.
-
-**After Kate updates.** `brew upgrade --cask kate` replaces the bundle and wipes
-the plugin. Run the installer again — it is idempotent:
+#### 2. Build the plugin
+Clone the repository and build:
 
 ```bash
-brew upgrade --cask kate
-curl -fsSL https://github.com/q0ppa/katexdown/releases/latest/download/install-macos.sh | bash
+git clone https://github.com/q0ppa/katexdown.git
+cd katexdown
+
+# Build the required KF6 frameworks locally once (cached in ~/.local/katexdown-kf6):
+packaging/macos/build-kf6.sh
+
+# Build the plugin binary:
+packaging/macos/build-plugin.sh
 ```
 
-**Uninstall / revert.** The uninstaller removes the plugin and re-signs Kate:
+#### 3. Install into Kate
+Quit Kate if it is running, then run the installer:
 
 ```bash
-curl -fsSL https://github.com/q0ppa/katexdown/releases/latest/download/uninstall-macos.sh | bash
+./packaging/macos/install-macos.sh
 ```
 
-For a completely pristine bundle (restoring Kate's vendor signature):
+What the installer does:
+- Finds `Kate.app` (in `/Applications`, `~/Applications`, or via `--kate <path>`).
+- Verifies Kate's Qt minor matches the plugin's Qt minor (preventing silent rejection by Kate's loader).
+- Copies `katexdown.so` into `Kate.app/Contents/PlugIns/kf6/ktexteditor/`.
+- Re-signs `Kate.app` ad-hoc with `packaging/macos/katexdown.entitlements` (disabling library validation and allowing JIT for WebEngine).
 
-```bash
-brew reinstall --cask kate
-```
+Now launch Kate and enable the plugin under **Settings → Configure Kate → Plugins → check Katexdown**.
 
-**Homebrew cask.** A cask template lives at `packaging/macos/Casks/katexdown.rb`
-for a project tap (`depends_on cask: "kate"`, `depends_on formula: "qtwebengine"`).
+#### Diagnostic, Uninstall & Updates
 
-Notes for macOS:
+- **Check preconditions without changing anything**:
+  ```bash
+  ./packaging/macos/install-macos.sh --doctor
+  ```
+- **Uninstall**:
+  ```bash
+  ./packaging/macos/install-macos.sh --uninstall
+  ```
+- **Clean revert to stock Kate**:
+  ```bash
+  brew reinstall --cask kate
+  ```
+- **After Kate updates**:
+  When `brew upgrade --cask kate` updates Kate, the bundle is replaced. Simply re-run:
+  ```bash
+  ./packaging/macos/install-macos.sh
+  ```
 
-- **Apple Silicon (arm64) only for now.** Homebrew publishes no `qt`/`qtwebengine`
-  bottle for Intel macOS.
-- Qt **patch** releases are interchangeable — Kate's plugin loader compares
-  major.minor only — but Qt **minor** is not. When Kate moves to a new Qt minor,
-  a plugin built for that minor is needed.
-
-#### Building locally on macOS
-
-To build the plugin on an Apple Silicon Mac:
-
-```bash
-brew install cmake ninja pkgconf qt gettext bison
-
-# Build KF6 build dependencies locally once:
-packaging/macos/build-kf6.sh --prefix "$HOME/.local/katexdown-kf6"
-
-# Build the plugin:
-packaging/macos/build-plugin.sh --kf6-prefix "$HOME/.local/katexdown-kf6" --out-dir dist
-```
+> [!NOTE]
+> **Apple Silicon (arm64) only**: Homebrew does not publish `qtwebengine` bottles for macOS on Intel (`x86_64`).
 
 ### Requirements (all platforms)
 

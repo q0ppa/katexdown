@@ -376,7 +376,12 @@ find_local_plugin() {
     if [ -n "${KATEXDOWN_PLUGIN:-}" ] && [ -f "$KATEXDOWN_PLUGIN" ]; then
         printf '%s' "$KATEXDOWN_PLUGIN"; return 0
     fi
-    for cand in "$(script_dir)"/katexdown*.so; do
+    for cand in \
+        "$(script_dir)"/katexdown*.so \
+        "$(script_dir)/../../dist"/katexdown*.so \
+        "$(script_dir)/../../build"/katexdown*.so \
+        ./dist/katexdown*.so \
+        ./build/katexdown*.so; do
         [ -f "$cand" ] && { printf '%s' "$cand"; return 0; }
     done
     return 1

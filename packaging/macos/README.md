@@ -19,17 +19,27 @@ packaging/macos/
 The architecture and rationale are documented in
 [`design/macos-install.md`](../../design/macos-install.md).
 
-## User installation
+## User installation & build
 
 ```sh
-# Install (Apple Silicon arm64; requires Homebrew, quits Kate first)
-curl -fsSL https://github.com/q0ppa/katexdown/releases/latest/download/install-macos.sh | bash
+# 1. Install prerequisites (Apple Silicon arm64 with Homebrew):
+brew install --cask kate
+brew install cmake ninja pkgconf qt qtwebengine gettext bison
 
-# Diagnose without changing anything
-curl -fsSL https://github.com/q0ppa/katexdown/releases/latest/download/install-macos.sh | bash -s -- --doctor
+# 2. Build the KF6 dependencies once (cached in ~/.local/katexdown-kf6):
+packaging/macos/build-kf6.sh
 
-# Uninstall (removes plugin, re-signs Kate)
-curl -fsSL https://github.com/q0ppa/katexdown/releases/latest/download/uninstall-macos.sh | bash
+# 3. Build the plugin:
+packaging/macos/build-plugin.sh
+
+# 4. Install into Kate (quits Kate if running, copies plugin, re-signs Kate.app):
+packaging/macos/install-macos.sh
+
+# Diagnose preconditions without changing anything:
+packaging/macos/install-macos.sh --doctor
+
+# Uninstall (removes plugin, re-signs Kate.app):
+packaging/macos/install-macos.sh --uninstall
 ```
 
 The installer:
@@ -40,18 +50,6 @@ The installer:
 5. Copies `katexdown.so` into `Kate.app/Contents/PlugIns/kf6/ktexteditor/`.
 6. Re-signs `Kate.app` ad-hoc with `packaging/macos/katexdown.entitlements`
    (disabling library validation so third-party plugins can load under hardened runtime).
-
-## Local developer build
-
-Building the plugin requires Apple Silicon macOS with Homebrew:
-
-```sh
-brew install cmake ninja pkgconf qt gettext bison
-
-# 1. Build KF6 dependencies (KTextEditor and transitive closure) once:
-packaging/macos/build-kf6.sh --prefix "$HOME/.local/katexdown-kf6"
-
-# 2. Build the plugin:
 packaging/macos/build-plugin.sh \
     --kf6-prefix "$HOME/.local/katexdown-kf6" \
     --out-dir dist
