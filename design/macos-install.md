@@ -64,7 +64,13 @@ packaging/macos/install-macos.sh
 3. Checks Kate's Qt minor against the plugin's build minor to avoid silent
    loader rejection.
 4. Verifies Homebrew and Qt WebEngine are installed (`brew install qtwebengine`).
-5. Copies `katexdown.so` into `<kate>/Contents/PlugIns/kf6/ktexteditor/`.
+5. Copies `katexdown.so` into `<kate>/Contents/PlugIns/kf6/ktexteditor/`, then
+   **relocates its load commands**: every dependency whose framework/library
+   name also exists in `<kate>/Contents/Frameworks` is rewritten with
+   `install_name_tool -change` to `@executable_path/../Frameworks/...`
+   (matching by name, not a pinned list). Only the WebEngine family
+   (`QtWebEngineWidgets`, `QtWebEngineCore`, `QtWebChannel`, `QtPositioning`),
+   which Kate does not bundle, is left on Homebrew.
 6. Re-signs the bundle ad-hoc with `packaging/macos/katexdown.entitlements` and
    de-quarantines:
    ```sh
@@ -119,8 +125,19 @@ sign of nested code followed by the bundle.
 ## Invariants
 
 - The plugin **must** be placed in `<kate>/Contents/PlugIns/kf6/ktexteditor/katexdown.so`.
-- The plugin's Qt **minor** must match Kate's Qt minor; the installer must refuse
+- The plugin **must** load Qt/KF6 from Kate's own `Contents/Frameworks`, not a
+  second Homebrew/local copy. Two copies of `libKF6TextEditor`/Qt in one process
+  make the cast to `KTextEditor::Plugin` fail, and Kate then lists the plugin but
+  can never enable it (the checkbox silently reverts). `install-macos.sh`
+  enforces this by relocating load commands by library name, so it survives
+  Qt/KF version bumps and new dependencies.
+- The Qt **minor** must match Kate's Qt minor; the installer must refuse
   a mismatch instead of silently producing a plugin Kate ignores.
+- The Qt **patch** must match exactly too: KF6 links Qt *private* symbols,
+  whose ABI tag (`QtPrivate_6_11_1` vs `QtPrivate_6_11_2`) changes every patch
+  release. A minor-only match installs a plugin that the loader lists but can
+  never enable. `install-macos.sh` compares the tag extracted from Kate's
+  `QtCore` and Homebrew's `QtCore` and refuses to install on a mismatch.
 - Re-signing is mandatory; removing the vendor signature is irreversible without
   reinstalling Kate.
 - Scripts must be idempotent: re-running the installer after

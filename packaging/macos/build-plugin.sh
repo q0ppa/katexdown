@@ -173,8 +173,19 @@ main() {
     fi
     kf6_complete "$kf6_prefix" || die "build-kf6.sh finished but '$kf6_prefix' still has no KF6TextEditor/KF6Config"
 
+    # An explicit --qt-prefix (e.g. an official Qt matching Kate, or a Qt from a
+    # versioned Homebrew tap) is authoritative: use it directly so CMake cannot
+    # silently link a different Homebrew Qt. Without it, keep the historical
+    # Homebrew split-module list.
     local prefix_path
-    prefix_path="$kf6_prefix;$(qt_prefix_list "$brew")"
+    if [ -n "$qt_prefix_arg" ]; then
+        prefix_path="$kf6_prefix;$qt_prefix"
+        if [ ! -d "$qt_prefix/lib/cmake/Qt6Widgets" ]; then
+            prefix_path="$prefix_path;$(qt_prefix_list "$brew")"
+        fi
+    else
+        prefix_path="$kf6_prefix;$(qt_prefix_list "$brew")"
+    fi
 
     [ "$clean" = "1" ] && rm -rf "$build_dir"
 

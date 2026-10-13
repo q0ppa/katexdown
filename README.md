@@ -224,11 +224,64 @@ Quit Kate if it is running, then run the installer:
 
 What the installer does:
 - Finds `Kate.app` (in `/Applications`, `~/Applications`, or via `--kate <path>`).
-- Verifies Kate's Qt minor matches the plugin's Qt minor (preventing silent rejection by Kate's loader).
-- Copies `katexdown.so` into `Kate.app/Contents/PlugIns/kf6/ktexteditor/`.
+- Verifies the plugin's Qt matches Kate's **exact** Qt patch (KF6 links Qt
+  *private* symbols, versioned per patch: `QtPrivate_6_11_1` vs
+  `QtPrivate_6_11_2`; a minor-only match installs a plugin Kate can list but
+  never enable).
+- Copies `katexdown.so` into `Kate.app/Contents/PlugIns/kf6/ktexteditor/` and
+  relocates its load commands to Kate's bundled Qt/KF6 where possible.
 - Re-signs `Kate.app` ad-hoc with `packaging/macos/katexdown.entitlements` (disabling library validation and allowing JIT for WebEngine).
 
 Now launch Kate and enable the plugin under **Settings → Configure Kate → Plugins → check Katexdown**.
+
+#### Building against Kate's exact Qt (only if Homebrew's Qt differs)
+
+KF6/KTextEditor link Qt *private* symbols, and those are versioned per Qt
+**patch** release (`QtPrivate_6_11_1`, `QtPrivate_6_11_2`, …). Kate can only
+instantiate a plugin built against the **exact same Qt patch**; on a mismatch
+Kate still lists the plugin, but ticking it silently reverts. First check
+whether you are affected:
+
+```bash
+./packaging/macos/install-macos.sh --doctor
+```
+
+If it reports `Qt private ABI matches Kate`, skip this section. Otherwise
+derive the exact Qt version Kate bundles (works for any version):
+
+```bash
+# e.g. QtPrivate_6_11_1  ->  6.11.1
+KATE_QT_ABI=$(nm -gU /Applications/kate.app/Contents/Frameworks/QtCore.framework/Versions/A/QtCore \
+    | grep -o 'QtPrivate_[0-9]*_[0-9]*_[0-9]*' | head -1)
+KATE_QT_VERSION=$(printf '%s' "$KATE_QT_ABI" | sed 's/^QtPrivate_//; s/_/./g')
+echo "Kate bundles Qt $KATE_QT_VERSION"
+```
+
+Install a Qt of that version (the official binaries are the easiest source;
+the `qtwebengine` module is required for the preview):
+
+```bash
+python3 -m venv ~/.venvs/aqt && ~/.venvs/aqt/bin/pip install aqtinstall
+~/.venvs/aqt/bin/aqt list-qt mac desktop --arch "$KATE_QT_VERSION"   # note the arch name
+~/.venvs/aqt/bin/aqt install-qt mac desktop "$KATE_QT_VERSION" clang_64 -m qtwebengine
+QT_PREFIX="$HOME/Qt/$KATE_QT_VERSION/macos"
+```
+
+Then build KF6 and the plugin against it. Use a KF6 prefix dedicated to that Qt
+version so prefixes built against different Qts never mix:
+
+```bash
+KF6_PREFIX="$HOME/.local/katexdown-kf6-$KATE_QT_VERSION"
+packaging/macos/build-kf6.sh    --qt-prefix "$QT_PREFIX" --prefix "$KF6_PREFIX"
+packaging/macos/build-plugin.sh --qt-prefix "$QT_PREFIX" --kf6-prefix "$KF6_PREFIX"
+./packaging/macos/install-macos.sh --plugin dist/katexdown-<version>-macos-arm64.so
+```
+
+`--qt-prefix` / `KATEXDOWN_QT_PREFIX` is authoritative: the plugin is configured
+and linked against exactly that Qt, and `install-macos.sh` verifies the ABI of
+the built plugin against Kate before installing. The same commands work for any
+other matching Qt install (a versioned Homebrew tap, a Craft build, …) — only
+the `$KATE_QT_VERSION` / `$QT_PREFIX` values change.
 
 #### Diagnostic, Uninstall & Updates
 
@@ -252,6 +305,11 @@ Now launch Kate and enable the plugin under **Settings → Configure Kate → Pl
 
 > [!NOTE]
 > **Apple Silicon (arm64) only**: Homebrew does not publish `qtwebengine` bottles for macOS on Intel (`x86_64`).
+>
+> **If enabling does nothing** (the checkbox reverts), the plugin's Qt patch
+> does not match Kate's. Check with `packaging/macos/install-macos.sh --doctor`
+> and rebuild against a matching Qt as described under
+> [*Building against Kate's exact Qt*](#building-against-kates-exact-qt-only-if-homebrews-qt-differs).
 
 ### Requirements (all platforms)
 
