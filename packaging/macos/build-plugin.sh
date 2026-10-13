@@ -15,6 +15,8 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "$0")" && pwd -P)"
 repo_root="$(cd "$script_dir/../.." && pwd -P)"
+# shellcheck source=lib-qt.sh
+. "$script_dir/lib-qt.sh"
 
 PROG="build-plugin.sh"
 
@@ -32,8 +34,8 @@ Usage: ${PROG} [options]
 Options:
   --build-dir DIR       CMake build directory (default ./build)
   --out-dir DIR         where the release .so is written (default ./dist)
-  --kf6-prefix DIR      KF6 install prefix (default \$KATEXDOWN_KF6_PREFIX or ~/.local/katexdown-kf6)
-  --qt-prefix DIR       Homebrew Qt prefix (default: \$(brew --prefix qt))
+  --kf6-prefix DIR      KF6 install prefix (default: a Qt-specific ~/.local/katexdown-kf6[-<Qt version>])
+  --qt-prefix DIR       Qt prefix to build against (default: auto-detect Kate and provision one)
   --with-tests          also build the test binaries
   --no-build-kf6        never run build-kf6.sh; fail when the KF6 prefix is incomplete
   --clean               delete the build directory first
@@ -44,6 +46,7 @@ Options:
 Environment:
   KATEXDOWN_KF6_PREFIX  same as --kf6-prefix
   KATEXDOWN_QT_PREFIX   same as --qt-prefix
+  KATEXDOWN_QT_ROOT     where provision-qt.sh installs Qt (default ~/Qt)
 EOF
 }
 
@@ -89,10 +92,15 @@ read_qt_minor_from_prefix() {
 }
 
 qt_prefix_list() {
-    local brew="$1" f p out="" first="1"
-    for f in qt qtbase qtdeclarative qtspeech qtsvg qttools qtwebchannel qtwebengine qtpositioning; do
+    local brew="$1" f p out="" first="1" add="qt qtbase"
+    while IFS= read -r f; do
+        [ -n "$f" ] && add="$add $f"
+    done < <("$brew" list --formula 2>/dev/null | grep -E '^qt' || true)
+    for f in $add; do
         p="$("$brew" --prefix "$f" 2>/dev/null || true)"
         [ -n "$p" ] || continue
+        [ -d "$p/lib/cmake/Qt6" ] || continue
+        case ";$out;" in *";$p;"*) continue ;; esac
         if [ "$first" = "1" ]; then out="$p"; first="0"; else out="$out;$p"; fi
     done
     printf '%s' "$out"
@@ -122,8 +130,9 @@ EOF
 main() {
     local build_dir="$repo_root/build"
     local out_dir="$repo_root/dist"
-    local kf6_prefix="${KATEXDOWN_KF6_PREFIX:-$HOME/.local/katexdown-kf6}"
+    local kf6_prefix="${KATEXDOWN_KF6_PREFIX:-}"
     local qt_prefix_arg="${KATEXDOWN_QT_PREFIX:-}"
+    local cache_dir="${KATEXDOWN_KF6_CACHE:-$HOME/.cache/katexdown-kf6}"
     local with_tests="0" clean="0" build_kf6="1"
     local jobs
     jobs="$(sysctl -n hw.ncpu 2>/dev/null || printf '4')"
@@ -155,8 +164,15 @@ main() {
     local brew
     brew="$(find_brew)"
 
-    local qt_prefix="$qt_prefix_arg"
-    [ -n "$qt_prefix" ] || qt_prefix="$("$brew" --prefix qt 2>/dev/null || true)"
+    local qt_prefix
+    if [ -n "$qt_prefix_arg" ]; then
+        qt_prefix="$qt_prefix_arg"
+    else
+        log "resolving a Qt matching Kate..."
+        qt_prefix="$("$script_dir/provision-qt.sh" \
+            --scan-dir "$repo_root" --scan-dir "$cache_dir/src")" \
+            || die "could not resolve a Qt matching Kate (see provision-qt.sh output above)"
+    fi
     [ -n "$qt_prefix" ] || die "Homebrew's 'qt' formula is not installed; run 'brew install qt'"
     [ -d "$qt_prefix" ] || die "--qt-prefix '$qt_prefix' does not exist"
 
@@ -164,14 +180,30 @@ main() {
     brew_minor="$(read_qt_minor_from_prefix "$qt_prefix" || true)"
     log "Qt ${brew_minor:-unknown} from $qt_prefix"
 
-    # Fail early when the chosen Qt lacks a module the plugin needs (e.g. an
-    # official Qt installed without qtwebchannel/qtpositioning) instead of a
-    # late, cryptic find_package error.
-    local qt_component qt_missing=""
-    for qt_component in Core Gui Widgets Network WebChannel WebEngineWidgets Positioning; do
-        [ -f "$qt_prefix/lib/cmake/Qt6$qt_component/Qt6${qt_component}Config.cmake" ] || qt_missing="$qt_missing Qt6$qt_component"
-    done
-    [ -z "$qt_missing" ] || die "'$qt_prefix' is missing required Qt components:$qt_missing (for an aqt Qt add: -m qtwebengine qtwebchannel qtpositioning)"
+    # Fail early when the chosen Qt lacks a component the plugin needs, naming
+    # the exact component. The set is detected from the local CMakeLists, so no
+    # curated list can go stale (Positioning/WebChannel/WebEngineWidgets, ...).
+    local qt_components qt_missing
+    qt_components="$(kdx_detect_qt_components "$repo_root" "$cache_dir/src" || true)"
+    if [ -n "$qt_components" ]; then
+        qt_missing="$(kdx_missing_qt_components "$qt_prefix" $qt_components || true)"
+        [ -z "$qt_missing" ] || die "'$qt_prefix' is missing Qt components:$(printf ' %s' $qt_missing) (provision-qt.sh installs all aqt modules; or point --qt-prefix at a complete Qt)"
+    fi
+
+    # Default the KF6 prefix to a Qt-specific one so prefixes built against
+    # different Qt patches never mix; Homebrew keeps the historical default.
+    if [ -z "$kf6_prefix" ]; then
+        local qt_ver brew_qt
+        qt_ver="$(kdx_qt_prefix_version "$qt_prefix" || true)"
+        brew_qt="$("$brew" --prefix qt 2>/dev/null || true)"
+        if [ -n "$brew_qt" ] && [ "$qt_prefix" = "$brew_qt" ]; then
+            kf6_prefix="$HOME/.local/katexdown-kf6"
+        elif [ -n "$qt_ver" ]; then
+            kf6_prefix="$HOME/.local/katexdown-kf6-$qt_ver"
+        else
+            kf6_prefix="$HOME/.local/katexdown-kf6"
+        fi
+    fi
 
     if ! kf6_complete "$kf6_prefix"; then
         if [ "$build_kf6" != "1" ]; then
@@ -182,18 +214,12 @@ main() {
     fi
     kf6_complete "$kf6_prefix" || die "build-kf6.sh finished but '$kf6_prefix' still has no KF6TextEditor/KF6Config"
 
-    # An explicit --qt-prefix (e.g. an official Qt matching Kate, or a Qt from a
-    # versioned Homebrew tap) is authoritative: use it directly so CMake cannot
-    # silently link a different Homebrew Qt. Without it, keep the historical
-    # Homebrew split-module list.
+    # A provisioned/explicit Qt is complete, so trust it directly; fall back to
+    # the Homebrew split-keg list when the primary prefix is incomplete.
     local prefix_path
-    if [ -n "$qt_prefix_arg" ]; then
-        prefix_path="$kf6_prefix;$qt_prefix"
-        if [ ! -d "$qt_prefix/lib/cmake/Qt6Widgets" ]; then
-            prefix_path="$prefix_path;$(qt_prefix_list "$brew")"
-        fi
-    else
-        prefix_path="$kf6_prefix;$(qt_prefix_list "$brew")"
+    prefix_path="$kf6_prefix;$qt_prefix"
+    if [ ! -d "$qt_prefix/lib/cmake/Qt6Widgets" ]; then
+        prefix_path="$prefix_path;$(qt_prefix_list "$brew")"
     fi
 
     [ "$clean" = "1" ] && rm -rf "$build_dir"

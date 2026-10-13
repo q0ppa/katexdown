@@ -43,6 +43,11 @@ set -euo pipefail
 
 PROG="build-kf6.sh"
 
+script_dir="$(cd "$(dirname "$0")" && pwd -P)"
+repo_root="$(cd "$script_dir/../.." && pwd -P)"
+# shellcheck source=lib-qt.sh
+. "$script_dir/lib-qt.sh"
+
 # Resolved in main(), used by build_one().
 KF6_BISON_EXE=""
 KF6_FLEX_EXE=""
@@ -58,7 +63,7 @@ die()  { printf '%s: error: %s\n' "$PROG" "$*" >&2; exit 1; }
 # macOS CI run mis-reported a ktexteditor failure exactly that way). Print the error/linker lines
 # first, then the tail for surrounding context.
 report_log_failure() { # $1 log_file
-    local log_file="$1" hits
+    local log_file="$1" hits missing_comp
     hits="$(grep -n -i -A6 -E 'error:|fatal error:|undefined (symbol|reference)|ld: |duplicate symbol|CMake Error' "$log_file" 2>/dev/null | tail -n 60 || true)"
     if [ -n "$hits" ]; then
         printf '%s: --- error lines in %s ---\n' "$PROG" "$log_file" >&2
@@ -66,6 +71,13 @@ report_log_failure() { # $1 log_file
     fi
     printf '%s: --- tail of %s ---\n' "$PROG" "$log_file" >&2
     tail -n 30 "$log_file" >&2 || true
+    # Name the exact Qt component CMake could not find, so a Qt prefix that is
+    # missing one module is diagnosed instead of guessed at.
+    missing_comp="$(kdx_missing_component_from_log "$log_file" || true)"
+    if [ -n "$missing_comp" ]; then
+        printf '%s: Qt is missing component '%s'. Re-run provision-qt.sh (installs every aqt module) or point --qt-prefix at a complete Qt.\n' \
+            "$PROG" "$missing_comp" >&2
+    fi
 }
 
 usage() {
@@ -75,16 +87,18 @@ ${PROG} - build the pinned KF6 frameworks for macOS (arm64)
 Usage: ${PROG} [options]
 
 Options:
-  --prefix DIR       install prefix (default \$KATEXDOWN_KF6_PREFIX or ~/.local/katexdown-kf6)
-  --qt-prefix DIR    Homebrew Qt prefix (default: \$(brew --prefix qt))
+  --prefix DIR       install prefix (default: a Qt-specific ~/.local/katexdown-kf6[-<Qt version>])
+  --qt-prefix DIR    Qt prefix to build against (default: auto-detect Kate and provision one)
   --cache-dir DIR    downloads/extracted sources/build logs (default \$HOME/.cache/katexdown-kf6)
   --jobs N           parallel jobs (default: CPU count)
   --force            rebuild frameworks even when the prefix already has them
   --print-version    print the pinned KF6 version and exit
   -h, --help         this text
 
-The prefix is written to be cached: a framework whose CMake config already exists there is skipped,
-so restoring the CI cache and re-running this script is a no-op.
+The Qt prefix defaults to one whose private ABI matches Kate's exact Qt patch,
+provisioned with aqtinstall when needed (see provision-qt.sh). The prefix is
+written to be cached: a framework whose CMake config already exists there is
+skipped, so restoring the CI cache and re-running this script is a no-op.
 EOF
 }
 
@@ -200,7 +214,7 @@ build_one() { # $1 repo, $2 version, $3 prefix, $4 qt_prefix, $5 cache_dir, $6 j
 }
 
 main() {
-    local prefix="${KATEXDOWN_KF6_PREFIX:-$HOME/.local/katexdown-kf6}"
+    local prefix="${KATEXDOWN_KF6_PREFIX:-}"
     local qt_prefix_arg=""
     local cache_dir="${KATEXDOWN_KF6_CACHE:-$HOME/.cache/katexdown-kf6}"
     local jobs force="0"
@@ -231,19 +245,46 @@ main() {
 
     local brew qt_prefix
     brew="$(find_brew)"
-    qt_prefix="$qt_prefix_arg"
-    [ -n "$qt_prefix" ] || qt_prefix="$("$brew" --prefix qt 2>/dev/null || true)"
+
+    # The Qt must carry Kate's exact private ABI (patch-level). An explicit
+    # --qt-prefix is authoritative; otherwise detect Kate's Qt and reuse a
+    # matching prefix, or provision one with aqtinstall.
+    if [ -n "$qt_prefix_arg" ]; then
+        qt_prefix="$qt_prefix_arg"
+    else
+        log "resolving a Qt matching Kate..."
+        qt_prefix="$("$script_dir/provision-qt.sh" \
+            --scan-dir "$repo_root" --scan-dir "$cache_dir/src")" \
+            || die "could not resolve a Qt matching Kate (see provision-qt.sh output above)"
+    fi
     [ -n "$qt_prefix" ] || die "Homebrew's 'qt' formula is not installed; run 'brew install qt'"
     [ -d "$qt_prefix/lib/cmake/Qt6" ] || die "'$qt_prefix' does not look like a Qt prefix (no lib/cmake/Qt6)"
 
-    # Fail early (and name the exact missing modules) when the chosen Qt lacks
-    # something the KF6 closure needs, instead of dying inside some framework.
-    # (TextToSpeech is deliberately not required: WITH_TEXT_TO_SPEECH=OFF.)
-    local qt_component qt_missing=""
-    for qt_component in Core Gui Widgets Network PrintSupport Xml Concurrent DBus Qml Quick; do
-        [ -f "$qt_prefix/lib/cmake/Qt6$qt_component/Qt6${qt_component}Config.cmake" ] || qt_missing="$qt_missing Qt6$qt_component"
-    done
-    [ -z "$qt_missing" ] || die "'$qt_prefix' is missing required Qt components:$qt_missing (install them, e.g. with the matching aqt modules, and re-run)"
+    # Default the install prefix to a Qt-specific one so prefixes built against
+    # different Qt patches never mix. Homebrew keeps the historical default.
+    if [ -z "$prefix" ]; then
+        local qt_ver brew_qt
+        qt_ver="$(kdx_qt_prefix_version "$qt_prefix" || true)"
+        brew_qt="$("$brew" --prefix qt 2>/dev/null || true)"
+        if [ -n "$brew_qt" ] && [ "$qt_prefix" = "$brew_qt" ]; then
+            prefix="$HOME/.local/katexdown-kf6"
+        elif [ -n "$qt_ver" ]; then
+            prefix="$HOME/.local/katexdown-kf6-$qt_ver"
+        else
+            prefix="$HOME/.local/katexdown-kf6"
+        fi
+    fi
+
+    # Fail early (naming the exact components) when the chosen Qt lacks
+    # something the sources need, instead of dying inside some framework. The
+    # component set is detected from the local CMakeLists, so no curated list
+    # can go stale when upstream adds a dependency (TextToSpeech, TaskTree, ...).
+    local qt_components qt_missing
+    qt_components="$(kdx_detect_qt_components "$repo_root" "$cache_dir/src" || true)"
+    if [ -n "$qt_components" ]; then
+        qt_missing="$(kdx_missing_qt_components "$qt_prefix" $qt_components || true)"
+        [ -z "$qt_missing" ] || die "'$qt_prefix' is missing Qt components:$(printf ' %s' $qt_missing) (provision-qt.sh installs all aqt modules; or point --qt-prefix at a complete Qt)"
+    fi
 
     # Solid needs bison >= 3.0; macOS ships 2.3 and Homebrew's bison is keg-only. Prefer the
     # Homebrew one, then a PATH bison that is new enough.

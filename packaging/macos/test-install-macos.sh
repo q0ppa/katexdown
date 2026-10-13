@@ -658,6 +658,87 @@ out="$(run_installer "$ENV_NOBREW" --no-brew --kate "$ENV_NOBREW/Kate.app" --plu
 assert_contains "$out" "WebEngine is not installed" "--no-brew reports the missing engine instead of installing it"
 check "no brew install was attempted" "! grep -q 'brew install' \"$ENV_NOBREW/tool.log\""
 
+# ---- Qt detection (lib-qt.sh) --------------------------------------------------
+# The build tooling must derive the required Qt components and aqt modules from
+# the sources/aqt itself, never from a curated list that goes stale (the old
+# lists kept missing one module: TextToSpeech, TaskTree, ...). These tests run on
+# any host because detection is pure text processing.
+
+. "$SCRIPT_DIR/lib-qt.sh"
+
+scan_dir="$work_root/scan"
+mkdir -p "$scan_dir"
+cat > "$scan_dir/CMakeLists.txt" <<'CMAKE'
+find_package(Qt6 6.5 CONFIG REQUIRED Core Gui Widgets)
+find_package(Qt6 ${REQUIRED_QT_VERSION} NO_MODULE REQUIRED COMPONENTS Core Network Test)
+find_package(Qt6 ${REQUIRED_QT_VERSION} CONFIG REQUIRED Qml Quick OPTIONAL_COMPONENTS QuickTest)
+find_package(Qt6 ${REQUIRED_QT_VERSION} CONFIG OPTIONAL_COMPONENTS OnlyOptional)
+find_package(Qt6Core 6.5 REQUIRED NO_MODULE)
+find_package(Qt6GuiPrivate 6.5 REQUIRED NO_MODULE)
+include(something) # find_package(Qt6 REQUIRED Commented)
+CMAKE
+detected="$(kdx_detect_qt_components "$scan_dir")"
+assert_contains "$detected" "Widgets" "detector finds components from a shared-module find_package"
+assert_contains "$detected" "Network" "detector finds components after COMPONENTS"
+assert_contains "$detected" "Qml" "detector finds components before OPTIONAL_COMPONENTS"
+if printf '%s' "$detected" | grep -q 'QuickTest'; then
+    fail "detector must drop OPTIONAL_COMPONENTS (found QuickTest)"
+else
+    printf 'test: ok   detector drops OPTIONAL_COMPONENTS\n'; checks=$((checks + 1))
+fi
+if printf '%s' "$detected" | grep -q 'OnlyOptional'; then
+    fail "detector must ignore an OPTIONAL_COMPONENTS-only line (found OnlyOptional)"
+else
+    printf 'test: ok   detector ignores OPTIONAL_COMPONENTS-only lines\n'; checks=$((checks + 1))
+fi
+if printf '%s' "$detected" | grep -q 'Commented'; then
+    fail "detector must ignore commented-out find_package calls"
+else
+    printf 'test: ok   detector ignores commented find_package calls\n'; checks=$((checks + 1))
+fi
+
+# A KF6 source cache layout: <dir>/<repo>/CMakeLists.txt.
+cache_scan="$work_root/scan-cache"
+mkdir -p "$cache_scan/ktexteditor-6.30.0"
+cat > "$cache_scan/ktexteditor-6.30.0/CMakeLists.txt" <<'CMAKE'
+find_package(Qt6 ${REQUIRED_QT_VERSION} NO_MODULE REQUIRED Core Widgets Qml PrintSupport TextToSpeech)
+CMAKE
+detected="$(kdx_detect_qt_components "$cache_scan")"
+assert_contains "$detected" "TextToSpeech" "detector scans a cache layout for TextToSpeech"
+
+# Presence is checked against an actual Qt prefix.
+qtfake="$work_root/qtfake"
+mkdir -p "$qtfake/lib/cmake/Qt6" "$qtfake/lib/cmake/Qt6Core"
+: > "$qtfake/lib/cmake/Qt6Core/Qt6CoreConfig.cmake"
+missing="$(kdx_missing_qt_components "$qtfake" Core Gui)"
+assert_contains "$missing" "Gui" "a component missing from the prefix is reported"
+if printf '%s' "$missing" | grep -q '^Core$'; then
+    fail "a present component must not be reported missing"
+else
+    printf 'test: ok   a present component is not reported missing\n'; checks=$((checks + 1))
+fi
+
+# Both CMake missing-component message forms are recognised.
+printf 'CMake Error: Failed to find required Qt component "TextToSpeech".\n' > "$work_root/miss1.log"
+assert_contains "$(kdx_missing_component_from_log "$work_root/miss1.log")" "TextToSpeech" \
+    "a shared-module missing-component error is parsed"
+printf -- '-- Could NOT find Qt6TaskTree (missing: Qt6TaskTree_DIR)\n' > "$work_root/miss2.log"
+assert_contains "$(kdx_missing_component_from_log "$work_root/miss2.log")" "TaskTree" \
+    "a per-module missing-component error is parsed"
+
+# provision-qt.sh: an explicit --qt-prefix is authoritative and printed.
+prov_out="$(/bin/bash "$SCRIPT_DIR/provision-qt.sh" --qt-version 6.11.1 --qt-prefix "$qtfake" \
+    --scan-dir "$scan_dir" 2>/dev/null || true)"
+assert_contains "$prov_out" "$qtfake" "provision-qt.sh accepts and prints an explicit Qt prefix"
+check "provision-qt.sh --help works" "/bin/bash \"$SCRIPT_DIR/provision-qt.sh\" --help | grep -q -- '--qt-version'"
+
+# The scripts must not carry a curated aqt module list any more.
+if grep -rEq -- '-m (qtwebengine|qtwebchannel|qtpositioning|qtspeech)' "$SCRIPT_DIR"/*.sh 2>/dev/null; then
+    fail "a curated aqt module list is still present in packaging/macos/*.sh"
+else
+    printf 'test: ok   no curated aqt module list remains in the scripts\n'; checks=$((checks + 1))
+fi
+
 # --------------------------------------------------------------------------- result
 
 if [ "$failures" -eq 0 ]; then

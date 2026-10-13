@@ -203,6 +203,27 @@ qt_private_abi() {
     nm -gU "$qtcore" 2>/dev/null | sed -n 's/.*\(QtPrivate_[0-9][0-9]*_[0-9][0-9]*_[0-9][0-9]*\).*/\1/p' | head -1
 }
 
+# Exact Qt private ABI of the QtCore a plugin links against. The load command
+# can be an absolute path or @rpath/@loader_path, which is resolved through the
+# plugin's own LC_RPATH entries (the build records the Qt prefix as an rpath).
+plugin_qt_abi() {
+    local plugin="$1" ref rpath cand
+    [ -f "$plugin" ] || return 1
+    command -v otool >/dev/null 2>&1 || return 1
+    ref="$(otool -L "$plugin" 2>/dev/null | tail -n +2 | awk '{print $1}' | grep '/QtCore\.framework/.*/QtCore$' | head -1)"
+    [ -n "$ref" ] || return 1
+    case "$ref" in
+        @rpath/*|@loader_path/*|@executable_path/*)
+            while IFS= read -r rpath; do
+                [ -n "$rpath" ] || continue
+                cand="$rpath/${ref#@*/*}"
+                if [ -f "$cand" ]; then qt_private_abi "$cand"; return 0; fi
+            done < <(otool -l "$plugin" 2>/dev/null | sed -n '/LC_RPATH/{n;n;s/.*path //;s/ (offset.*//;p;}')
+            return 1 ;;
+        *) qt_private_abi "$ref" ;;
+    esac
+}
+
 kate_qt_minor() {
     local fw="$1/${FRAMEWORKS_REL}/QtCore.framework"
     [ -d "$fw" ] || return 1
@@ -509,7 +530,7 @@ cmd_install() {
     require_macos
     require_host_arch
 
-    local kate plugin brew ents dst_dir dst_file kate_minor exp_minor kate_qt_abi plugin_qt_abi plugin_qtcore
+    local kate plugin brew ents dst_dir dst_file kate_minor exp_minor kate_qt_abi plugin_qt_abi
 
     kate="$(find_kate_app "$kate_arg")" || die_hint "no Kate on this Mac." \
         "Looked at \$KATEXDOWN_KATE_APP, Spotlight, /Applications and ~/Applications." \
@@ -541,8 +562,7 @@ cmd_install() {
     # plugin but can never instantiate it. Check the plugin artifact itself so
     # this works for any Qt (Homebrew or an official install).
     kate_qt_abi="$(qt_private_abi "$kate/$FRAMEWORKS_REL/QtCore.framework/Versions/A/QtCore" || true)"
-    plugin_qtcore="$(otool -L "$plugin" 2>/dev/null | tail -n +2 | awk '{print $1}' | grep '/QtCore\.framework/.*/QtCore$' | head -1)"
-    plugin_qt_abi="$(qt_private_abi "$plugin_qtcore" || true)"
+    plugin_qt_abi="$(plugin_qt_abi "$plugin" || true)"
     if [ -n "$kate_qt_abi" ] && [ -n "$plugin_qt_abi" ] && [ "$kate_qt_abi" != "$plugin_qt_abi" ]; then
         die_hint "Qt private-ABI mismatch: this plugin is $plugin_qt_abi, Kate is $kate_qt_abi." \
             "KTextEditor/KF6 link Qt private symbols, which change every patch release, so the plugin and" \
@@ -641,6 +661,12 @@ cmd_doctor() {
         else
             report fail "cannot read Kate's Qt minor from ${FRAMEWORKS_REL}/QtCore.framework"
         fi
+        # KF6 links Qt private symbols, so the exact patch matters: report it.
+        local kate_abi
+        kate_abi="$(qt_private_abi "$kate/$FRAMEWORKS_REL/QtCore.framework/Versions/A/QtCore" || true)"
+        if [ -n "$kate_abi" ]; then
+            report ok "Kate's Qt private ABI: $kate_abi"
+        fi
         if ( : > "$kate/Contents/.katexdown-doctor-probe.$$" ) 2>/dev/null; then
             rm -f "$kate/Contents/.katexdown-doctor-probe.$$"
             report ok "Kate bundle is writable"
@@ -676,7 +702,7 @@ cmd_doctor() {
             local_plugin="$(find_local_plugin "$plugin_arg" || true)"
             if [ -n "$local_plugin" ]; then
                 subject_what="plugin"
-                subject_abi="$(qt_private_abi "$(otool -L "$local_plugin" 2>/dev/null | tail -n +2 | awk '{print $1}' | grep '/QtCore\.framework/.*/QtCore$' | head -1)" || true)"
+                subject_abi="$(plugin_qt_abi "$local_plugin" || true)"
             fi
             [ -n "$subject_abi" ] || subject_abi="$(qt_private_abi "$("$brew" --prefix qtbase 2>/dev/null)/lib/QtCore.framework/Versions/A/QtCore" || true)"
             if [ -n "$kate_abi" ] && [ -n "$subject_abi" ]; then

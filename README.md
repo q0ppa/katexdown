@@ -208,10 +208,12 @@ Clone the repository and build:
 git clone https://github.com/q0ppa/katexdown.git
 cd katexdown
 
-# Build the required KF6 frameworks locally once (cached in ~/.local/katexdown-kf6):
+# Build the required KF6 frameworks locally once. This auto-selects a Qt whose
+# private ABI matches Kate's exact Qt patch, provisioning a matching Qt +
+# modules with aqtinstall when Homebrew's Qt differs:
 packaging/macos/build-kf6.sh
 
-# Build the plugin binary:
+# Build the plugin against the same Qt:
 packaging/macos/build-plugin.sh
 ```
 
@@ -234,61 +236,56 @@ What the installer does:
 
 Now launch Kate and enable the plugin under **Settings → Configure Kate → Plugins → check Katexdown**.
 
-#### Building against Kate's exact Qt (only if Homebrew's Qt differs)
+#### Qt selection is automatic (self-diagnosing, self-installing)
 
 KF6/KTextEditor link Qt *private* symbols, and those are versioned per Qt
 **patch** release (`QtPrivate_6_11_1`, `QtPrivate_6_11_2`, …). Kate can only
 instantiate a plugin built against the **exact same Qt patch**; on a mismatch
-Kate still lists the plugin, but ticking it silently reverts. First check
-whether you are affected:
+Kate still lists the plugin, but ticking it silently reverts. You do not have
+to track that by hand:
+
+- `build-kf6.sh` and `build-plugin.sh` detect Kate's exact Qt version from the
+  private ABI tag in Kate's bundled `QtCore` (e.g. `QtPrivate_6_11_1` →
+  `6.11.1`).
+- They detect the Qt CMake components the build needs by scanning the local
+  `find_package(Qt6 …)` calls, so no curated module list can go stale.
+- They reuse an already-installed matching Qt if one exists — your
+  `--qt-prefix`/`$KATEXDOWN_QT_PREFIX`, then `$KATEXDOWN_QT_ROOT/<ver>/macos`,
+  then Homebrew's Qt (the Homebrew-only path is used unchanged when it
+  matches). Otherwise they install that Qt with aqtinstall, together with **all
+  modules aqt reports** for the version/arch (its own list, minus debug
+  symbols) — not a hand-maintained module list.
+- They use a Qt-specific KF6 prefix (`~/.local/katexdown-kf6-<Qt version>`) so
+  prefixes built against different Qt patches never mix.
+
+Check what will be used, without building:
 
 ```bash
-./packaging/macos/install-macos.sh --doctor
+./packaging/macos/provision-qt.sh --print-version   # Kate's exact Qt version
+./packaging/macos/provision-qt.sh                   # resolve/provision, print the prefix
 ```
 
-If it reports `Qt private ABI matches Kate`, skip this section. Otherwise
-derive the exact Qt version Kate bundles (works for any version):
+#### Manual override (only if you have your own matching Qt)
+
+`--qt-prefix` / `KATEXDOWN_QT_PREFIX` is authoritative: the plugin is
+configured and linked against exactly that Qt, and `install-macos.sh` verifies
+the ABI of the built plugin against Kate before installing. The same commands
+work for any other matching Qt install (an aqt Qt, a versioned Homebrew tap, a
+Craft build, …):
 
 ```bash
-# e.g. QtPrivate_6_11_1  ->  6.11.1
-KATE_QT_ABI=$(nm -gU /Applications/kate.app/Contents/Frameworks/QtCore.framework/Versions/A/QtCore \
-    | grep -o 'QtPrivate_[0-9]*_[0-9]*_[0-9]*' | head -1)
-KATE_QT_VERSION=$(printf '%s' "$KATE_QT_ABI" | sed 's/^QtPrivate_//; s/_/./g')
-echo "Kate bundles Qt $KATE_QT_VERSION"
-```
-
-Install a Qt of that version (the official binaries are the easiest source;
-the `qtwebengine` module is required for the preview):
-
-```bash
-python3 -m venv ~/.venvs/aqt && ~/.venvs/aqt/bin/pip install aqtinstall
-~/.venvs/aqt/bin/aqt list-qt mac desktop --arch "$KATE_QT_VERSION"   # note the arch name
-~/.venvs/aqt/bin/aqt install-qt mac desktop "$KATE_QT_VERSION" clang_64 \
-    -m qtwebengine qtwebchannel qtpositioning
+# e.g. QtPrivate_6_11_1 -> 6.11.1
+KATE_QT_VERSION=$(./packaging/macos/provision-qt.sh --print-version)
 QT_PREFIX="$HOME/Qt/$KATE_QT_VERSION/macos"
-ls "$QT_PREFIX/lib/cmake/Qt6" >/dev/null || echo "QT_PREFIX is wrong: $QT_PREFIX"
-```
-
-Then build KF6 and the plugin against it. Use a KF6 prefix dedicated to that Qt
-version so prefixes built against different Qts never mix:
-
-```bash
 KF6_PREFIX="$HOME/.local/katexdown-kf6-$KATE_QT_VERSION"
+
 packaging/macos/build-kf6.sh    --qt-prefix "$QT_PREFIX" --prefix "$KF6_PREFIX"
 packaging/macos/build-plugin.sh --qt-prefix "$QT_PREFIX" --kf6-prefix "$KF6_PREFIX"
 ./packaging/macos/install-macos.sh --plugin dist/katexdown-<version>-macos-arm64.so
 ```
 
-`--qt-prefix` / `KATEXDOWN_QT_PREFIX` is authoritative: the plugin is configured
-and linked against exactly that Qt, and `install-macos.sh` verifies the ABI of
-the built plugin against Kate before installing. The same commands work for any
-other matching Qt install (a versioned Homebrew tap, a Craft build, …) — only
-the `$KATE_QT_VERSION` / `$QT_PREFIX` values change.
-
-> A custom Qt needs the base modules plus `qtwebengine`, `qtwebchannel` and
-> `qtpositioning` for the preview. The build disables the optional Qt Speech
-> integration (`WITH_TEXT_TO_SPEECH=OFF`), so the Qt Speech module is not
-> required; `build-kf6.sh` lists any component your Qt is still missing.
+`install-macos.sh --doctor` prints the exact private ABI of the local plugin
+and of Kate, and refuses to install on a mismatch.
 
 #### Diagnostic, Uninstall & Updates
 
@@ -315,8 +312,9 @@ the `$KATE_QT_VERSION` / `$QT_PREFIX` values change.
 >
 > **If enabling does nothing** (the checkbox reverts), the plugin's Qt patch
 > does not match Kate's. Check with `packaging/macos/install-macos.sh --doctor`
-> and rebuild against a matching Qt as described under
-> [*Building against Kate's exact Qt*](#building-against-kates-exact-qt-only-if-homebrews-qt-differs).
+> and rebuild; `build-kf6.sh`/`build-plugin.sh` will select or install a
+> matching Qt automatically as described under
+> [*Qt selection is automatic*](#qt-selection-is-automatic-self-diagnosing-self-installing).
 
 ### Requirements (all platforms)
 

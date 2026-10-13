@@ -55,6 +55,15 @@ packaging/macos/build-plugin.sh
 packaging/macos/install-macos.sh
 ```
 
+`build-kf6.sh`/`build-plugin.sh` resolve the Qt themselves: they read Kate's
+exact Qt patch from the private ABI tag in its bundled `QtCore`, scan the local
+`find_package(Qt6 ...)` calls for the Qt components the build needs, and reuse a
+matching Qt if one is installed (explicit prefix, `$KATEXDOWN_QT_ROOT/<ver>/macos`,
+or Homebrew's Qt). Otherwise `provision-qt.sh` installs that Qt with aqtinstall
+together with every module aqt reports for the version/arch - no curated module
+list. This keeps the Homebrew-only path when Homebrew's Qt has the matching ABI,
+but also recovers automatically when Homebrew has moved on to another Qt patch.
+
 `install-macos.sh` performs the following minimal, reliable steps:
 
 1. Locates `kate.app` case-insensitively: `$KATEXDOWN_KATE_APP`, then
@@ -136,18 +145,29 @@ sign of nested code followed by the bundle.
 - The Qt **patch** must match exactly too: KF6 links Qt *private* symbols,
   whose ABI tag (`QtPrivate_6_11_1` vs `QtPrivate_6_11_2`) changes every patch
   release. A minor-only match installs a plugin that the loader lists but can
-  never enable. `install-macos.sh` compares the tag extracted from Kate's
-  `QtCore` and Homebrew's `QtCore` and refuses to install on a mismatch.
+  never enable. The ABI tag extracted from Kate's bundled `QtCore` is the
+  authority: `lib-qt.sh` turns it into the exact Qt version the build must use,
+  `install-macos.sh` compares it against the plugin's linked `QtCore`, and
+  `--doctor` reports both.
+- The matching Qt and the Qt components a build needs are determined
+  **programmatically** - from Kate's `QtCore` ABI tag and by scanning the
+  sources' `find_package(Qt6 ...)` calls - and provisioned from aqt's own module
+  list. There must be **no curated Qt-module list** in the scripts: every such
+  list so far missed one more module (`TextToSpeech`, `TaskTree`, ...), which is
+  what forced the manual Qt installs this design replaces.
 - Re-signing is mandatory; removing the vendor signature is irreversible without
   reinstalling Kate.
 - Scripts must be idempotent: re-running the installer after
-  `brew upgrade --cask kate` must restore the plugin cleanly.
+  `brew upgrade --cask kate` must restore the plugin cleanly. Re-running the
+  build scripts must reuse the cached KF6 prefix and the installed Qt.
 - Uninstall must cleanly remove the plugin and re-sign Kate.
 
 ## Where it lives
 
 - `packaging/macos/` — `install-macos.sh` (installer and uninstaller),
   `uninstall-macos.sh` (front door), `katexdown.entitlements`,
+  `lib-qt.sh` (Kate/Qt detection helpers, sourced), `provision-qt.sh`
+  (detect Kate's Qt + install a matching one via aqtinstall),
   `build-plugin.sh`, `build-kf6.sh`, `test-install-macos.sh` (offline tests),
   `Casks/katexdown.rb` (cask template), `README.md`.
 - `README.md` — user-facing macOS documentation.
