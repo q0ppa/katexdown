@@ -23,6 +23,11 @@
 #                     already excludes it on APPLE (kxmlgui's CMakeLists guards the
 #                     find_package with NOT APPLE), so nothing here links KF6::GlobalAccel.
 #
+#   WITH_TEXT_TO_SPEECH=OFF - KTextWidgets' optional text-to-speech integration. Turning it off drops
+#                     its hard `find_package(Qt6 ... REQUIRED TextToSpeech)`, so a Qt prefix without
+#                     the Speech module (e.g. a minimal official Qt) can still build the closure.
+#                     The plugin does not use TTS.
+#
 # FLAGS THAT MATTER
 #   BUILD_TESTING=OFF     - no test frameworks, no extra deps.
 #   CMAKE_DISABLE_FIND_PACKAGE_KF6DocTools=ON - see above (docs only).
@@ -176,6 +181,7 @@ build_one() { # $1 repo, $2 version, $3 prefix, $4 qt_prefix, $5 cache_dir, $6 j
             -DBUILD_DESIGNERPLUGIN=OFF \
             -DCMAKE_DISABLE_FIND_PACKAGE_KF6DocTools=ON \
             -DUSE_BreezeIcons=OFF \
+            -DWITH_TEXT_TO_SPEECH=OFF \
             -DKDE_INSTALL_BUNDLEDIR="$prefix/Applications" \
             -DBISON_EXECUTABLE="$KF6_BISON_EXE" \
             -DFLEX_EXECUTABLE="$KF6_FLEX_EXE" \
@@ -229,6 +235,15 @@ main() {
     [ -n "$qt_prefix" ] || qt_prefix="$("$brew" --prefix qt 2>/dev/null || true)"
     [ -n "$qt_prefix" ] || die "Homebrew's 'qt' formula is not installed; run 'brew install qt'"
     [ -d "$qt_prefix/lib/cmake/Qt6" ] || die "'$qt_prefix' does not look like a Qt prefix (no lib/cmake/Qt6)"
+
+    # Fail early (and name the exact missing modules) when the chosen Qt lacks
+    # something the KF6 closure needs, instead of dying inside some framework.
+    # (TextToSpeech is deliberately not required: WITH_TEXT_TO_SPEECH=OFF.)
+    local qt_component qt_missing=""
+    for qt_component in Core Gui Widgets Network PrintSupport Xml Concurrent DBus Qml Quick; do
+        [ -f "$qt_prefix/lib/cmake/Qt6$qt_component/Qt6${qt_component}Config.cmake" ] || qt_missing="$qt_missing Qt6$qt_component"
+    done
+    [ -z "$qt_missing" ] || die "'$qt_prefix' is missing required Qt components:$qt_missing (install them, e.g. with the matching aqt modules, and re-run)"
 
     # Solid needs bison >= 3.0; macOS ships 2.3 and Homebrew's bison is keg-only. Prefer the
     # Homebrew one, then a PATH bison that is new enough.

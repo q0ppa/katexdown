@@ -164,6 +164,15 @@ main() {
     brew_minor="$(read_qt_minor_from_prefix "$qt_prefix" || true)"
     log "Qt ${brew_minor:-unknown} from $qt_prefix"
 
+    # Fail early when the chosen Qt lacks a module the plugin needs (e.g. an
+    # official Qt installed without qtwebchannel/qtpositioning) instead of a
+    # late, cryptic find_package error.
+    local qt_component qt_missing=""
+    for qt_component in Core Gui Widgets Network WebChannel WebEngineWidgets Positioning; do
+        [ -f "$qt_prefix/lib/cmake/Qt6$qt_component/Qt6${qt_component}Config.cmake" ] || qt_missing="$qt_missing Qt6$qt_component"
+    done
+    [ -z "$qt_missing" ] || die "'$qt_prefix' is missing required Qt components:$qt_missing (for an aqt Qt add: -m qtwebengine qtwebchannel qtpositioning)"
+
     if ! kf6_complete "$kf6_prefix"; then
         if [ "$build_kf6" != "1" ]; then
             die "the KF6 prefix '$kf6_prefix' is incomplete and --no-build-kf6 was given. Build it with packaging/macos/build-kf6.sh --prefix '$kf6_prefix'"

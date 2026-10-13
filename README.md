@@ -263,8 +263,10 @@ the `qtwebengine` module is required for the preview):
 ```bash
 python3 -m venv ~/.venvs/aqt && ~/.venvs/aqt/bin/pip install aqtinstall
 ~/.venvs/aqt/bin/aqt list-qt mac desktop --arch "$KATE_QT_VERSION"   # note the arch name
-~/.venvs/aqt/bin/aqt install-qt mac desktop "$KATE_QT_VERSION" clang_64 -m qtwebengine
+~/.venvs/aqt/bin/aqt install-qt mac desktop "$KATE_QT_VERSION" clang_64 \
+    -m qtwebengine qtwebchannel qtpositioning
 QT_PREFIX="$HOME/Qt/$KATE_QT_VERSION/macos"
+ls "$QT_PREFIX/lib/cmake/Qt6" >/dev/null || echo "QT_PREFIX is wrong: $QT_PREFIX"
 ```
 
 Then build KF6 and the plugin against it. Use a KF6 prefix dedicated to that Qt
@@ -282,6 +284,11 @@ and linked against exactly that Qt, and `install-macos.sh` verifies the ABI of
 the built plugin against Kate before installing. The same commands work for any
 other matching Qt install (a versioned Homebrew tap, a Craft build, …) — only
 the `$KATE_QT_VERSION` / `$QT_PREFIX` values change.
+
+> A custom Qt needs the base modules plus `qtwebengine`, `qtwebchannel` and
+> `qtpositioning` for the preview. The build disables the optional Qt Speech
+> integration (`WITH_TEXT_TO_SPEECH=OFF`), so the Qt Speech module is not
+> required; `build-kf6.sh` lists any component your Qt is still missing.
 
 #### Diagnostic, Uninstall & Updates
 
