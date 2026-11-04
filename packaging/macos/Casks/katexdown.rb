@@ -21,7 +21,7 @@
 # executable bit, so the script is passed to bash as an argument.
 
 cask "katexdown" do
-  version "0.4.0"
+  version "0.4.1"
 
   # TODO(tap): replace with the sha256 of install-macos.sh for this version, before publishing in a
   # tap: `curl -fsSL <url> | shasum -a 256`. :no_check keeps the template installable meanwhile.

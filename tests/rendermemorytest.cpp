@@ -448,6 +448,8 @@ void RenderMemoryTest::maintenanceRecycleFreesMemoryAndKeepsThePage()
     preview->resize(700, 500);
     preview->show();
     QVERIFY(waitForText(preview.get(), QLatin1String("alpha0")));
+    QTest::qWait(1500); // let the first render settle
+    const long baselineKb = totalEngineKb();
 
     // Churn: repeated full-document re-renders pile up dead renderer memory.
     for (int i = 0; i < 7; ++i) {
@@ -456,7 +458,9 @@ void RenderMemoryTest::maintenanceRecycleFreesMemoryAndKeepsThePage()
     }
     QTest::qWait(800);
     const long beforeKb = totalEngineKb();
-    QVERIFY2(beforeKb > 300 * 1024, qPrintable(QStringLiteral("churn did not build up memory, total=%1 kB").arg(beforeKb)));
+    QVERIFY2(beforeKb > baselineKb + 16 * 1024,
+             qPrintable(QStringLiteral("churn did not build up memory: baseline %1 kB, before %2 kB")
+                            .arg(baselineKb).arg(beforeKb)));
 
     // Scroll into the document, then recycle in place.
     evalJs(preview.get(), QStringLiteral("window.scrollTo(0, 1200);"));
@@ -469,15 +473,17 @@ void RenderMemoryTest::maintenanceRecycleFreesMemoryAndKeepsThePage()
     QTest::qWait(1500); // let the post-load scroll restore land
 
     const long afterKb = totalEngineKb();
-    qInfo("engine RSS before recycle %ld kB, after %ld kB", beforeKb, afterKb);
+    qInfo("engine RSS fresh baseline %ld kB, before recycle %ld kB, after %ld kB",
+          baselineKb, beforeKb, afterKb);
     // Two static helper processes (~140 MB) never die; the renderer itself is
-    // back at its fresh-process baseline (~180 MB), so the total lands around
-    // 320 MB no matter how much dead memory was reclaimed. (With the 64 MB
-    // default cap the churn builds less before the recycle than it did at 128,
-    // so the absolute drop is smaller — what matters is that it lands at the
-    // baseline.)
-    QVERIFY2(afterKb + 50 * 1024 < beforeKb && afterKb < 400 * 1024,
-             qPrintable(QStringLiteral("recycle did not reclaim memory: %1 kB -> %2 kB").arg(beforeKb).arg(afterKb)));
+    // back at its fresh-process baseline once the recycle lands. Compare with
+    // that measured baseline instead of a fixed MB drop: how much the churn
+    // builds varies with timing/load (CI has been seen at ~366 MB, not the
+    // usual ~390 MB), but the recycle must always return to the fresh level.
+    QVERIFY2(afterKb < baselineKb + 24 * 1024 && afterKb + 16 * 1024 < beforeKb,
+             qPrintable(QStringLiteral("recycle did not return to the fresh-renderer baseline: "
+                                       "baseline %1 kB, before %2 kB, after %3 kB")
+                            .arg(baselineKb).arg(beforeKb).arg(afterKb)));
 
     const double scrollAfter = evalJs(preview.get(), QStringLiteral("String(window.scrollY)")).toDouble();
     QVERIFY2(qAbs(scrollAfter - scrollBefore) < 2.0,
