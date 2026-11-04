@@ -23,6 +23,7 @@
 #include <QIcon>
 #include <QKeyEvent>
 #include <QLineEdit>
+#include <QSplitter>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QUrl>
@@ -281,6 +282,7 @@ private Q_SLOTS:
     void keptModesFreezeAndReleaseWhileClosed();
     void directionalFocusUsesPaneGeometryBothWays();
     void previewEditableBypassesGlobalPaneRouter();
+    void paneWidthTargetsAndAppliesToSplitter();
 
 private:
     QTemporaryDir m_dir;
@@ -952,6 +954,62 @@ void FollowModeTest::previewEditableBypassesGlobalPaneRouter()
     qApp->removeEventFilter(&probe);
     host.release();
     Settings::self()->setVimReadingNavigation(false);
+}
+
+void FollowModeTest::paneWidthTargetsAndAppliesToSplitter()
+{
+    // Pure arithmetic: percentage of the available width, clamped to the
+    // supported range (10..80 %) and 0 when there is nothing to divide.
+    QCOMPARE(PaneWidth::target(0, 35), 0);
+    QCOMPARE(PaneWidth::target(1000, 35), 350);
+    QCOMPARE(PaneWidth::target(1000, 5), 100);
+    QCOMPARE(PaneWidth::target(1000, 95), 800);
+
+    // Apply against a plain splitter hierarchy like Kate's:
+    // outer [ editor | ownSplit ].
+    QSplitter outer(Qt::Horizontal);
+    auto *editor = new QWidget(&outer);
+    auto *own = new QSplitter(&outer);
+    // Like Kate's ownSplit, the pane needs a child with a real minimum size;
+    // an empty QSplitter is given zero width by its parent.
+    auto *stack = new QWidget;
+    stack->setMinimumSize(160, 160);
+    own->addWidget(stack);
+    auto *toolView = new QWidget(stack);
+    const int paneIndex = outer.indexOf(own);
+    QCOMPARE(paneIndex, 1);
+    QCOMPARE(outer.indexOf(editor), 0);
+
+    // The adapter resolves the same shape from the tool view alone, and
+    // refuses an unrelated widget (the "Kate changed its layout" case).
+    QSplitter *resolvedOwn = nullptr;
+    QSplitter *resolvedOuter = nullptr;
+    QVERIFY(PaneWidth::resolve(toolView, &resolvedOwn, &resolvedOuter));
+    QCOMPARE(resolvedOwn, own);
+    QCOMPARE(resolvedOuter, &outer);
+    QWidget orphan;
+    QVERIFY(!PaneWidth::resolve(&orphan, &resolvedOwn, &resolvedOuter));
+    QVERIFY(!resolvedOwn);
+    QVERIFY(!resolvedOuter);
+
+    outer.resize(1000, 500);
+    outer.show();
+    QTest::qWait(10);
+    outer.setSizes({600, 400});
+    QTRY_VERIFY(outer.sizes().size() == 2);
+    QVERIFY(outer.sizes().at(paneIndex) > 0);
+
+    const int total = outer.sizes().at(0) + outer.sizes().at(paneIndex);
+    QVERIFY(PaneWidth::apply(&outer, own, 350));
+    QCOMPARE(outer.sizes().at(paneIndex), 350);
+    QCOMPARE(outer.sizes().at(0), total - 350);
+    // Applying the same width again is a no-op.
+    QVERIFY(!PaneWidth::apply(&outer, own, 350));
+
+    // Oversized requests leave a usable editor: the pane stops at total-200.
+    QVERIFY(PaneWidth::apply(&outer, own, total * 2));
+    QCOMPARE(outer.sizes().at(paneIndex), total - 200);
+    QCOMPARE(outer.sizes().at(0), 200);
 }
 
 QTEST_MAIN(FollowModeTest)

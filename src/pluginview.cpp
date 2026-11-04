@@ -12,6 +12,7 @@
 #include <QIcon>
 #include <QKeySequence>
 #include <QKeyEvent>
+#include <QSplitter>
 #include <QTimer>
 #include <QtMath>
 #include <QUrl>
@@ -38,6 +39,94 @@ QString readUiRc()
     return QString::fromUtf8(f.readAll());
 }
 } // namespace
+
+namespace PaneWidth
+{
+bool resolve(QWidget *toolView, QSplitter **own, QSplitter **outer)
+{
+    *own = nullptr;
+    *outer = nullptr;
+    if (!toolView) {
+        return false;
+    }
+    // Kate's MDI shape: ToolView -> tab-stack widget -> ownSplit (one QSplitter
+    // per sidebar) -> m_hSplitter/m_vSplitter. Only Left/Right make the pane
+    // width meaningful (Top/Bottom is a height). This is the one adapter point.
+    QWidget *stack = toolView->parentWidget();
+    auto *ownSplit = stack ? qobject_cast<QSplitter *>(stack->parentWidget()) : nullptr;
+    if (!ownSplit) {
+        return false;
+    }
+    auto *outerSplit = qobject_cast<QSplitter *>(ownSplit->parentWidget());
+    if (!outerSplit || outerSplit->orientation() != Qt::Horizontal || outerSplit->indexOf(ownSplit) < 0) {
+        return false;
+    }
+    *own = ownSplit;
+    *outer = outerSplit;
+    return true;
+}
+
+int target(int total, int percent)
+{
+    if (total <= 0) {
+        return 0;
+    }
+    percent = qBound(10, percent, 80);
+    return qMax(1, qRound(total * percent / 100.0));
+}
+
+bool apply(QSplitter *outer, QSplitter *own, int targetWidth)
+{
+    if (!outer || !own) {
+        return false;
+    }
+    const int index = outer->indexOf(own);
+    if (index < 0) {
+        return false;
+    }
+    const QList<int> sizes = outer->sizes();
+    if (sizes.size() < 2 || index >= sizes.size()) {
+        return false;
+    }
+    int total = 0;
+    for (const int size : sizes) {
+        total += size;
+    }
+    if (total <= 0) {
+        return false;
+    }
+    // Keep both sides usable: a very small window must not turn the preview
+    // into the whole frame (or the editor into a sliver).
+    targetWidth = qBound(200, targetWidth, qMax(200, total - 200));
+    if (targetWidth == sizes.at(index)) {
+        return false;
+    }
+    int donor = -1;
+    int donorSize = 0;
+    for (int i = 0; i < sizes.size(); ++i) {
+        if (i != index && sizes.at(i) > donorSize) {
+            donor = i;
+            donorSize = sizes.at(i);
+        }
+    }
+    if (donor < 0) {
+        return false;
+    }
+    int delta = targetWidth - sizes.at(index);
+    if (delta > donorSize) {
+        delta = donorSize;
+        targetWidth = sizes.at(index) + delta;
+        if (delta == 0) {
+            return false;
+        }
+    }
+    QList<int> next = sizes;
+    next[index] = targetWidth;
+    next[donor] = sizes.at(donor) - delta;
+    outer->setSizes(next);
+    return true;
+}
+} // namespace PaneWidth
 
 PluginView::PluginView(KTextEditor::Plugin *plugin, KTextEditor::MainWindow *mainWindow)
     : QObject(plugin)
@@ -75,10 +164,18 @@ PluginView::PluginView(KTextEditor::Plugin *plugin, KTextEditor::MainWindow *mai
     connect(Settings::self(), &Settings::changed, this, &PluginView::onSettingsChanged);
     qApp->installEventFilter(this);
 
+    // Debounced width-override apply. Created before the tool view so the
+    // first show/resize can schedule work immediately; it is a no-op unless
+    // Settings::paneWidthOverride() is on (see design/pane-width.md).
+    m_paneWidthTimer = new QTimer(this);
+    m_paneWidthTimer->setSingleShot(true);
+    connect(m_paneWidthTimer, &QTimer::timeout, this, &PluginView::applyPaneWidth);
+
     // The tool-view shell (plain QWidget, negligible cost) always exists so
     // kate's sidebar button, View menu entry and session restore work. The
     // heavy web view inside it obeys the loading mode.
     ensureToolView();
+    schedulePaneWidthApply(0);
 
     if (loadingMode() == Settings::Eager) {
         ensurePreview();
@@ -90,6 +187,9 @@ PluginView::PluginView(KTextEditor::Plugin *plugin, KTextEditor::MainWindow *mai
 PluginView::~PluginView()
 {
     qApp->removeEventFilter(this);
+    if (m_paneSplitter) {
+        m_paneSplitter->removeEventFilter(this);
+    }
     m_mainWindow->guiFactory()->removeClient(this);
     // The tool view is ours to delete (kate's own preview plugin does the
     // same); this unregisters it from the MDI and destroys any preview +
@@ -312,10 +412,19 @@ bool PluginView::eventFilter(QObject *watched, QEvent *event)
     if (handleEditorDirectionalEvent(watched, event)) {
         return true;
     }
+    if (watched == m_paneSplitter && event->type() == QEvent::Resize) {
+        // The window was tiled/maximized or resized: keep a percentage width
+        // proportional. The 0 ms timer coalesces the burst of resize events.
+        schedulePaneWidthApply(0);
+    }
     if (watched == m_toolView) {
         switch (event->type()) {
         case QEvent::Show:
             m_panelVisible = true;
+            schedulePaneWidthApply(0);
+            // Kate's session restore re-runs updateSidebar() ~400 ms after
+            // startup; re-apply after it, or it would overwrite our width.
+            QTimer::singleShot(600, this, &PluginView::applyPaneWidth);
             onPanelShown();
             return false;
         case QEvent::Hide:
@@ -453,6 +562,57 @@ void PluginView::onSettingsChanged()
     if (loadingMode() == Settings::Eager && !m_preview) {
         ensurePreview();
     }
+    schedulePaneWidthApply(0);
+}
+
+void PluginView::updatePaneSplitterWatch(QSplitter *outer)
+{
+    if (m_paneSplitter == outer) {
+        return;
+    }
+    if (m_paneSplitter) {
+        m_paneSplitter->removeEventFilter(this);
+    }
+    m_paneSplitter = outer;
+    if (m_paneSplitter) {
+        m_paneSplitter->installEventFilter(this);
+    }
+}
+
+void PluginView::schedulePaneWidthApply(int delayMs)
+{
+    if (!m_paneWidthTimer) {
+        return;
+    }
+    m_paneWidthTimer->start(delayMs);
+}
+
+void PluginView::applyPaneWidth()
+{
+    if (!Settings::self()->paneWidthOverride() || !m_panelVisible) {
+        return;
+    }
+    QSplitter *own = nullptr;
+    QSplitter *outer = nullptr;
+    if (!PaneWidth::resolve(m_toolView, &own, &outer)) {
+        if (!m_paneWidthUnavailableWarned) {
+            m_paneWidthUnavailableWarned = true;
+            qInfo("[katexdown] pane width override: Kate's tool-view splitter was not found; leaving the width alone");
+        }
+        return;
+    }
+    m_paneWidthUnavailableWarned = false;
+    updatePaneSplitterWatch(outer);
+    int total = 0;
+    const QList<int> sizes = outer->sizes();
+    for (const int size : sizes) {
+        total += size;
+    }
+    const int wanted = PaneWidth::target(total, Settings::self()->paneWidthPercent());
+    if (wanted <= 0) {
+        return;
+    }
+    PaneWidth::apply(outer, own, wanted);
 }
 
 void PluginView::updateActionState()

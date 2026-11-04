@@ -12,8 +12,30 @@
 class QAction;
 class QEvent;
 class PreviewWidget;
+class QSplitter;
+class QTimer;
 class QWidget;
 class QKeyEvent;
+
+/**
+ * Geometry helpers for the tool-view pane, kept free-function so the tests can
+ * drive them against a plain QSplitter without a real Kate window. Kate's MDI
+ * owns the pane width in its private splitters; these only nudge it.
+ */
+namespace PaneWidth
+{
+// Find the pane that holds `toolView`. This is the only place that knows
+// Kate's MDI widget shape; if Kate changes it, adjust this function alone.
+// False (and null outputs) when the host does not use that shape.
+bool resolve(QWidget *toolView, QSplitter **own, QSplitter **outer);
+// Width for `percent` of `total`, without the clamp that needs the sibling
+// sizes (0 when there is nothing to divide).
+int target(int total, int percent);
+// Set `own`'s pane inside `outer` to `targetWidth`, taking the delta from the
+// largest sibling so the other panes keep their sizes. Returns whether the
+// splitter changed.
+bool apply(QSplitter *outer, QSplitter *own, int targetWidth);
+} // namespace PaneWidth
 
 namespace KTextEditor
 {
@@ -77,6 +99,11 @@ private:
     void destroyPreview();
     void onPanelShown();
     void onPanelHidden();
+    // Opt-in width override (Settings::paneWidthOverride): resolve the splitter
+    // that holds the tool-view stack and (re)apply the configured share.
+    void schedulePaneWidthApply(int delayMs = 0);
+    void applyPaneWidth();
+    void updatePaneSplitterWatch(QSplitter *outer);
     Settings::LoadingMode loadingMode() const;
     bool handleEditorDirectionalEvent(QObject *watched, QEvent *event);
     QWidget *paneForWidget(QWidget *widget) const;
@@ -91,6 +118,11 @@ private:
     QPointer<QWidget> m_toolView;
     QPointer<PreviewWidget> m_preview;
     bool m_panelVisible = false;
+    // Width-override support: the outer splitter pane is watched for resizes so
+    // a percentage stays proportional when the window is tiled/maximized.
+    QTimer *m_paneWidthTimer = nullptr;
+    QPointer<QSplitter> m_paneSplitter;
+    bool m_paneWidthUnavailableWarned = false;
     // Whether the panel was open in the previous session (persisted via
     // SessionConfigInterface); decoupled from m_panelVisible so a kate-window
     // close (which hides the panel) does not forget that it was open.

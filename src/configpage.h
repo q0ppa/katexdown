@@ -40,6 +40,10 @@ private:
     QComboBox *m_mode = nullptr;
     QComboBox *m_variant = nullptr;
     QComboBox *m_loading = nullptr;
+    // Optional workaround for a window whose splitter cannot be dragged (see
+    // Settings::paneWidthOverride).
+    QCheckBox *m_paneWidthOverride = nullptr;
+    QSpinBox *m_paneWidthPercent = nullptr;
     QComboBox *m_imageMode = nullptr;
     // When decoded-image memory may be reclaimed by recreating the page
     // (Settings::ImageReclaim).

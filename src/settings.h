@@ -76,6 +76,10 @@ public:
         MinimizedOnly = 0,
         IdleVisible = 1,
     };
+    // Share of the left/right editor area given to the preview pane when
+    // Settings::paneWidthOverride() is on. 35% is a usable default for the
+    // Markdown article without starving the editor. See design/pane-width.md.
+    static constexpr int DefaultPaneWidthPercent = 35;
     // V8 old-space cap for the preview's renderer, in MB (see
     // design/lazyrender.md, "JS heap guard"). 64 MB is the default: paired
     // with the idle forced GC that hands the freed pages back, it keeps a
@@ -135,6 +139,19 @@ public:
     {
         return m_tocLevels;
     }
+    // Opt-in workaround for environments where the Kate window's splitter
+    // handles are not interactive (the preview pane then sits at its 160 px
+    // minimum and cannot be dragged). When on, Katexdown sets the pane width
+    // itself on show/resize; it modifies the shared left/right tool-view pane,
+    // so other plugins in that sidebar follow the same width. Off by default.
+    bool paneWidthOverride() const
+    {
+        return m_paneWidthOverride;
+    }
+    int paneWidthPercent() const
+    {
+        return m_paneWidthPercent;
+    }
 
     void setMode(Mode mode);
     void setGhVariant(GhVariant variant);
@@ -148,6 +165,8 @@ public:
     void setV8HeapCapMb(int mb);
     void setCustomCssFiles(const QStringList &files);
     void setTocLevels(const QList<int> &levels);
+    void setPaneWidthOverride(bool enabled);
+    void setPaneWidthPercent(int percent);
 
     void load();
     void save() const;
@@ -185,4 +204,7 @@ private:
     QStringList m_customCssFiles;
     // Heading levels (1..6) recognized by the floating section outline.
     QList<int> m_tocLevels = {1, 2, 3, 4, 5};
+    // Opt-in splitter workaround (see the accessor comment above).
+    bool m_paneWidthOverride = false;
+    int m_paneWidthPercent = DefaultPaneWidthPercent;
 };

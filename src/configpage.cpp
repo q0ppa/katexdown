@@ -88,6 +88,30 @@ ConfigPage::ConfigPage(QWidget *parent)
     loadingHint->setEnabled(false);
     form->addRow(QString(), loadingHint);
 
+    // Workaround for environments where Kate's splitter handles are not
+    // interactive (the preview pane is stuck at its 160 px minimum and cannot
+    // be dragged). Off by default; with a working splitter, dragging is
+    // better because Kate remembers that width itself.
+    m_paneWidthOverride = new QCheckBox(i18n("Set the preview panel width manually"), this);
+    m_paneWidthOverride->setToolTip(i18n("Use only when the divider between the editor and the preview cannot be dragged. "
+                                        "The width then follows the percentage below instead of the (unusable) splitter handle."));
+    form->addRow(QString(), m_paneWidthOverride);
+    m_paneWidthPercent = new QSpinBox(this);
+    m_paneWidthPercent->setRange(10, 80);
+    m_paneWidthPercent->setSingleStep(5);
+    m_paneWidthPercent->setSuffix(i18n(" %"));
+    form->addRow(i18n("Panel share:"), m_paneWidthPercent);
+    auto *paneWidthHint = new QLabel(
+        i18n("Only for a Kate window whose splitter cannot be dragged: the preview then stays at its 160 px "
+             "minimum. The setting gives the whole left/right tool-view pane (shared with plugins such as "
+             "snippets) this share of the editor area and follows window resizes. Leave it off otherwise — "
+             "Kate remembers a width you set with the mouse."),
+        this);
+    paneWidthHint->setWordWrap(true);
+    paneWidthHint->setEnabled(false);
+    form->addRow(QString(), paneWidthHint);
+    connect(m_paneWidthOverride, &QCheckBox::toggled, this, &ConfigPage::syncEnabled);
+
     m_imageMode = new QComboBox(this);
     m_imageMode->addItem(i18n("Eager — decode every image at once (classic)"), Settings::DecodeAll);
     m_imageMode->addItem(i18n("Auto — lazy decode; off-screen images are released in image-heavy documents (default)"), Settings::Adaptive);
@@ -336,6 +360,7 @@ void ConfigPage::syncEnabled()
 {
     const bool github = m_mode->currentData().toInt() == Settings::GitHub;
     m_variant->setEnabled(github);
+    m_paneWidthPercent->setEnabled(m_paneWidthOverride->isChecked());
 }
 
 void ConfigPage::addCssFile()
@@ -423,6 +448,8 @@ void ConfigPage::apply()
     s->setImageMode(static_cast<Settings::ImageMode>(m_imageMode->currentData().toInt()));
     s->setImageReclaim(static_cast<Settings::ImageReclaim>(m_imageReclaim->currentData().toInt()));
     s->setV8HeapCapMb(m_v8Cap->value());
+    s->setPaneWidthOverride(m_paneWidthOverride->isChecked());
+    s->setPaneWidthPercent(m_paneWidthPercent->value());
     QList<int> levels;
     for (int level = 1; level <= 6; ++level) {
         if (m_tocLevel[level - 1]->isChecked()) {
@@ -450,6 +477,8 @@ void ConfigPage::reset()
     m_imageMode->setCurrentIndex(m_imageMode->findData(s->imageMode()));
     m_imageReclaim->setCurrentIndex(m_imageReclaim->findData(s->imageReclaim()));
     m_v8Cap->setValue(s->v8HeapCapMb());
+    m_paneWidthOverride->setChecked(s->paneWidthOverride());
+    m_paneWidthPercent->setValue(s->paneWidthPercent());
     m_cssList->clear();
     const QStringList css = s->customCssFiles();
     for (const QString &file : css) {
@@ -474,6 +503,8 @@ void ConfigPage::defaults()
     m_imageMode->setCurrentIndex(m_imageMode->findData(Settings::Adaptive));
     m_imageReclaim->setCurrentIndex(m_imageReclaim->findData(Settings::MinimizedOnly));
     m_v8Cap->setValue(Settings::DefaultV8HeapCapMb);
+    m_paneWidthOverride->setChecked(false);
+    m_paneWidthPercent->setValue(Settings::DefaultPaneWidthPercent);
     m_cssList->clear();
     for (int level = 1; level <= 6; ++level) {
         m_tocLevel[level - 1]->setChecked(level <= 5); // H1-H5 default, H6 off

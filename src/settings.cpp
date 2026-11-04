@@ -87,6 +87,10 @@ void Settings::load()
     // Missing key -> defaultTocLevels(); an explicitly empty list means "no
     // levels, outline off".
     m_tocLevels = sanitizedLevels(cfg.readEntry("TocLevels", defaultTocLevels()));
+    // Missing key -> the off state; the percentage is kept in a sane range so
+    // a hand-edited config cannot starve either pane.
+    m_paneWidthOverride = cfg.readEntry("PaneWidthOverride", false);
+    m_paneWidthPercent = qBound(10, cfg.readEntry("PaneWidthPercent", DefaultPaneWidthPercent), 80);
 }
 
 void Settings::save() const
@@ -110,6 +114,8 @@ void Settings::save() const
         levels << QString::number(level);
     }
     cfg.writeEntry("TocLevels", levels);
+    cfg.writeEntry("PaneWidthOverride", m_paneWidthOverride);
+    cfg.writeEntry("PaneWidthPercent", m_paneWidthPercent);
     cfg.sync();
 }
 
@@ -220,6 +226,27 @@ void Settings::setCustomCssFiles(const QStringList &files)
         return;
     }
     m_customCssFiles = files;
+    save();
+    Q_EMIT changed();
+}
+
+void Settings::setPaneWidthOverride(bool enabled)
+{
+    if (m_paneWidthOverride == enabled) {
+        return;
+    }
+    m_paneWidthOverride = enabled;
+    save();
+    Q_EMIT changed();
+}
+
+void Settings::setPaneWidthPercent(int percent)
+{
+    const int clean = qBound(10, percent, 80);
+    if (m_paneWidthPercent == clean) {
+        return;
+    }
+    m_paneWidthPercent = clean;
     save();
     Q_EMIT changed();
 }
