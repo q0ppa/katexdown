@@ -91,15 +91,34 @@ jobs:
           & $env:VSDEVSH -SkipAutomaticLocation -Arch amd64 -HostArch amd64
           $env:ANDROID_SDK_ROOT = $null
           python -m pip install --upgrade certifi
+          # The bootstrap is the run's first network step and has no retry of its own: install_craft.ps1
+          # and then CraftBootstrap.py both fetch from invent.kde.org, and the latter downloads the
+          # Craft source archive. The v0.4.1 tag run died here 10 s in on 2026-11-04 (the same day
+          # GitHub Actions had major incident windows and KDE's Craft tree landed "server
+          # unreachable" workarounds), before a single line of this project was built. Retry the
+          # whole bootstrap instead of failing a release on one bad download.
           $installer = Join-Path $env:RUNNER_TEMP 'install_craft.ps1'
-          Invoke-WebRequest -Uri 'https://invent.kde.org/packaging/craft/-/raw/master/setup/install_craft.ps1' -OutFile $installer
-          Unblock-File -Path $installer
-          # -use-defaults picks msvc2022 + x86_64 with no prompts. It is a param() script, so it has
-          # to be invoked as a file; piping it to iex cannot pass arguments.
-          & $installer -use-defaults -root C:\CraftRoot
-          if (-not (Test-Path 'C:\CraftRoot\craft\craftenv.ps1')) {
-            throw 'craft bootstrap produced no craftenv.ps1'
+          $bootstrapped = $false
+          foreach ($attempt in 1..3) {
+            Write-Host "craft bootstrap attempt $attempt"
+            # A failed attempt leaves a partial C:\CraftRoot. install_craft.ps1 then stops at its
+            # "directory already exists" prompt, which cannot be answered on a runner, so wipe it
+            # first (the first attempt has nothing to remove; -ErrorAction Ignore covers that).
+            Remove-Item -Path C:\CraftRoot -Recurse -Force -ErrorAction Ignore
+            try {
+              Invoke-WebRequest -Uri 'https://invent.kde.org/packaging/craft/-/raw/master/setup/install_craft.ps1' -OutFile $installer
+              Unblock-File -Path $installer
+              # -use-defaults picks msvc2022 + x86_64 with no prompts. It is a param() script, so it
+              # has to be invoked as a file; piping it to iex cannot pass arguments.
+              & $installer -use-defaults -root C:\CraftRoot
+            } catch {
+              Write-Warning "craft bootstrap attempt $attempt threw: $_"
+            }
+            if (Test-Path 'C:\CraftRoot\craft\craftenv.ps1') { $bootstrapped = $true; break }
+            Write-Warning "craft bootstrap attempt $attempt left no craftenv.ps1"
+            Start-Sleep -Seconds (15 * $attempt)
           }
+          if (-not $bootstrapped) { throw 'craft bootstrap produced no craftenv.ps1 after 3 attempts' }
           # craftenv.ps1 opens with `cls`, which throws in a non-console host and takes the whole
           # step with it.
           Unblock-File -Path C:\CraftRoot\craft\craftenv.ps1

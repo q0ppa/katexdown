@@ -140,6 +140,19 @@ construction, exactly the staged tree.
   trade-off: pinning a choco version that disappears breaks the build for no
   gain. If `choco install nsis` ever becomes unreliable, the fallback is a
   pinned NSIS release zip fetched directly.
+- **The Craft bootstrap is the first network step and has no retry upstream.**
+  `install_craft.ps1` and `CraftBootstrap.py` both download from
+  invent.kde.org, and the latter fetches the Craft source archive. The v0.4.1
+  tag run failed 10 s into that step on 2026-11-04 — the same day GitHub
+  Actions had major incident windows and KDE's Craft tree landed "server
+  unreachable" workarounds — before any project code was involved, while the
+  v0.4.0 tags, on the same workflow, were green. A failure there says nothing
+  about the plugin. The workflow therefore retries the whole bootstrap (up to
+  3 attempts, wiping
+  `C:\CraftRoot` between tries because `install_craft.ps1` prompts on a
+  non-empty root and a non-interactive runner cannot answer). Do not "fix" a
+  red run at this step by changing the plugin; check whether the download or
+  the KDE/GitHub network was down first.
 
 ## Test seams
 
@@ -149,6 +162,10 @@ construction, exactly the staged tree.
   page size falls back to a constant off-POSIX — the `/proc` RSS tests skip at runtime on
   non-Linux via their `/proc/self/statm` existence check, but they still have to compile on
   MSVC, which has no `unistd.h`.
+- The Craft bootstrap failure mode is bounded by wall-clock: a failed run dies
+  in seconds at the download, while a real bootstrap spends minutes compiling
+  its base stack. The 3-attempt retry is therefore cheap for network flakes and
+  cannot turn a source-build regression into three hours of retries.
 - The installer is **silent-installed into a freshly downloaded real Kate** in
   `.github/workflows/windows.yml` (`/S`), file placement is asserted, then
   `previewlifecycletest.exe` renders against that Kate with `PATH` restricted
